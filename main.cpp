@@ -4,7 +4,6 @@
 #include <string>
 #include <vector>
 #include <windows.h>
-#include "hv.h"
 #include "src/CheckpointStore.h"
 #include "src/TencentBot.h"
 #include "src/DxgiWindowCapture.h"
@@ -77,7 +76,7 @@ int main(int argc, char** argv) {
     bool showCk = false;
     bool resetCk = false;
     bool setSomething = false;
-    std::string memBackend = "hv";
+    std::string memBackend = "vsock";
     uint32_t vsockCid = 2;
     uint32_t vsockPort = 4050;
     uint32_t vsockTimeoutMs = 5000;
@@ -187,12 +186,10 @@ int main(int argc, char** argv) {
     }
 
     std::shared_ptr<IProcessMemoryReader> reader;
-    if (memBackend == "hv") {
-        reader = create_hv_memory_reader();
-    } else if (memBackend == "vsock") {
+    if (memBackend == "vsock") {
         reader = create_vsock_memory_reader(vsockCid, vsockPort, vsockTimeoutMs);
     } else {
-        std::cerr << "unsupported --mem-backend: " << memBackend << " (expected hv|vsock)\n";
+        std::cerr << "unsupported --mem-backend: " << memBackend << " (expected vsock)\n";
         return 2;
     }
 
@@ -200,35 +197,6 @@ int main(int argc, char** argv) {
 
     // Ctrl+C / 关闭窗口请求安全停止（保存 checkpoint）
     SetConsoleCtrlHandler(ConsoleCtrlHandler, TRUE);
-
-    // 仅 hv 后端执行 HV 探测与隐藏。
-    if (memBackend == "hv") {
-        if (!hv::is_hv_running()) {
-            std::wcout << L"HV not running.\n";
-            return -1;
-        }
-
-        auto const hv_base = static_cast<uint8_t*>(hv::get_hv_base());
-        auto const hv_size = 0x64000;
-        hv::for_each_cpu([&](uint32_t) {
-            for (size_t i = 0; i < hv_size; i += 0x1000) {
-                auto const virt = hv_base + i;
-                auto const phys = hv::get_physical_address(0, virt);
-                hv::hide_physical_page(phys >> 12);
-            }
-        });
-    }
-
-    // 确保退出时清理 HV（仅 hv 后端需要）
-    struct HvCleanupGuard {
-        bool enabled = false;
-        ~HvCleanupGuard() {
-            if (!enabled) return;
-            hv::for_each_cpu([](uint32_t) {
-                hv::remove_all_mmrs();
-            });
-        }
-    } hvGuard{memBackend == "hv"};
 
     try {
         bot.init();

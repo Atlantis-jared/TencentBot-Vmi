@@ -1,0 +1,3 @@
+[submodule "IbInputSimulator"]
+	path = IbInputSimulator
+	url = https://github.com/Chaoses-Ib/IbInputSimulator.git
