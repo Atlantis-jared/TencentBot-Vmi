@@ -4,7 +4,6 @@
 #include "TencentBot.h"
 #include "BotLogger.h"
 #include "CheckpointStore.h"
-#include "../hv.h"
 
 // --- Windows 宏冲突修正 ---
 #ifdef min
@@ -119,7 +118,7 @@ void TencentBot::init() {
     HANDLE snapshot = CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0);
     if (snapshot == INVALID_HANDLE_VALUE) {
         BOT_ERR("TencentBot", "CreateToolhelp32Snapshot 失败");
-        return;
+        throw std::runtime_error("CreateToolhelp32Snapshot failed");
     }
 
     PROCESSENTRY32 processEntry{};
@@ -139,6 +138,15 @@ void TencentBot::init() {
     }
     CloseHandle(snapshot);
 
+    if (gameMemory.processIds.empty()) {
+        BOT_ERR("TencentBot", "未发现 mhmain.exe 进程");
+        throw std::runtime_error("mhmain.exe not found");
+    }
+    if (uiProcessPid == 0) {
+        BOT_ERR("TencentBot", "未发现 mhtab.exe 进程");
+        throw std::runtime_error("mhtab.exe not found");
+    }
+
     // --- 2. 由当前内存后端初始化 mhmain.dll 基址 ---
     std::string init_err;
     if (!gameMemory.initialize_module_bases("mhmain.dll", &init_err)) {
@@ -147,7 +155,11 @@ void TencentBot::init() {
     }
 
     // --- 3. 初始化鼠标模拟器 ---
-    IbSendInit(Send::SendType::Logitech, 0, nullptr);
+    const auto ibInitErr = IbSendInit(Send::SendType::Logitech, 0, nullptr);
+    if (ibInitErr != Send::Error::Success) {
+        BOT_ERR("TencentBot", "输入模拟器初始化失败, error=" << static_cast<int>(ibInitErr));
+        throw std::runtime_error("IbSendInit failed");
+    }
     BOT_LOG("TencentBot", "鼠标模拟器初始化完成 (Logitech)");
 
     // --- 4. 初始化 AI 验证码/文字识别引擎 ---
@@ -157,12 +169,16 @@ void TencentBot::init() {
     // --- 5. 初始化屏幕捕获（DXGI）---
     if (!screenCapture.initByPid(static_cast<DWORD>(uiProcessPid))) {
         BOT_ERR("TencentBot", "DXGI 窗口捕获初始化失败 PID=" << uiProcessPid);
+        throw std::runtime_error("DxgiWindowCapture init failed");
     } else {
         BOT_LOG("TencentBot", "DXGI 窗口捕获初始化成功");
     }
 
     // --- 6. 加载视觉识别模板 ---
-    vision.loadAllTemplates();
+    if (!vision.loadAllTemplates()) {
+        BOT_ERR("TencentBot", "视觉模板加载失败");
+        throw std::runtime_error("VisionEngine template load failed");
+    }
 
     BOT_LOG("TencentBot", "========== 初始化完成 ==========");
 }

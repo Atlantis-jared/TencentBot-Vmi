@@ -3,6 +3,7 @@
 #include <thread>
 #include <string>
 #include <vector>
+#include <clocale>
 #include <windows.h>
 #include "src/CheckpointStore.h"
 #include "src/TencentBot.h"
@@ -71,6 +72,13 @@ next_op 对应关系（v3）:
 } // namespace
 
 int main(int argc, char** argv) {
+#ifdef _WIN32
+    // Keep console code page aligned with /utf-8 string literals.
+    SetConsoleOutputCP(CP_UTF8);
+    SetConsoleCP(CP_UTF8);
+#endif
+    std::setlocale(LC_ALL, ".UTF-8");
+
     // Parse args for checkpoint management (no HV required)
     std::string checkpointPath = "bot_checkpoint.json";
     bool showCk = false;
