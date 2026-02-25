@@ -1,0 +1,27 @@
+{
+  "name" : "untitled",
+  "version-string" : "1.0.0",
+  "builtin-baseline" : "e6ebaa9c3ca8fca90c63af62fc895c2486609580",
+  "dependencies" : [ {
+    "name" : "opencv",
+    "version>=" : "4.12.0"
+  }, {
+    "name" : "nlohmann-json",
+    "version>=" : "3.12.0#2",
+    "$comment" : "    find_package(nlohmann_json CONFIG REQUIRED)\n\n    target_link_libraries(main PRIVATE nlohmann_json::nlohmann_json)\n"
+  }, {
+    "name" : "curl",
+    "version>=" : "8.18.0#1"
+  }, {
+    "name" : "cppwinrt",
+    "version>=" : "2.0.250303.1",
+    "$comment" : "    find_package(cppwinrt CONFIG REQUIRED)\n\n    target_link_libraries(main PRIVATE Microsoft::CppWinRT)\n"
+  }, {
+    "name" : "rapidjson",
+    "version>=" : "2025-02-26",
+    "$comment" : "  # this is heuristically generated, and may not be correct\n\n  find_package(RapidJSON CONFIG REQUIRED)\n\n  target_link_libraries(main PRIVATE RapidJSON rapidjson)\n"
+  }, {
+    "name" : "detours",
+    "version>=" : "4.0.1#8"
+  } ]
+}

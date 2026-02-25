@@ -1,0 +1,36 @@
+# Build outputs
+build/
+cmake-build-*/
+out/
+
+# IDE
+.idea/
+.vs/
+.vscode/
+*.user
+*.suo
+
+# vcpkg (submodule or local install)
+vcpkg/
+
+# IbInputSimulator (submodule)
+IbInputSimulator/
+
+# Binaries & intermediates
+*.exe
+*.dll
+*.lib
+*.obj
+*.pdb
+*.ilk
+*.exp
+*.log
+
+# OS files
+Thumbs.db
+Desktop.ini
+.DS_Store
+
+# Temporary screenshots
+img.png
+img_2.png
