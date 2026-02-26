@@ -46,6 +46,7 @@ R"(Checkpoint tools:
   --set-target-money <n>      设置目标银票（默认 150000）并退出
   --print-cursor              持续打印当前鼠标坐标（调试模式）
   --cursor-interval-ms <n>    鼠标坐标打印间隔毫秒（默认 100）
+  --pid <n>                   print-cursor 模式下用于读内存链的目标 PID
 
 next_op 对应关系（v3）:
   0: leave_gang_to_difu        出帮派 -> 长安 -> 大唐国境 -> 地府
@@ -66,6 +67,15 @@ next_op 对应关系（v3）:
             const auto v = std::stoull(s, nullptr, 0);
             if (v > 0xffffffffULL) return false;
             out = static_cast<uint32_t>(v);
+            return true;
+        } catch (...) {
+            return false;
+        }
+    }
+
+    bool parseU64(const std::string& s, uint64_t& out) {
+        try {
+            out = std::stoull(s, nullptr, 0);
             return true;
         } catch (...) {
             return false;
@@ -92,6 +102,7 @@ int main(int argc, char** argv) {
     uint32_t vsockPort = 4050;
     uint32_t vsockTimeoutMs = 5000;
     uint32_t cursorIntervalMs = 100;
+    uint64_t debugPid = 0;
     TradingCheckpoint forced{};
     bool forceNextOp = false, forceCycle = false, forceTarget = false;
 
@@ -132,6 +143,10 @@ int main(int argc, char** argv) {
         }
         if (a == "--cursor-interval-ms" && i + 1 < argc) {
             if (!parseU32(args[++i], cursorIntervalMs)) { std::cerr << "bad --cursor-interval-ms\n"; return 2; }
+            continue;
+        }
+        if (a == "--pid" && i + 1 < argc) {
+            if (!parseU64(args[++i], debugPid)) { std::cerr << "bad --pid\n"; return 2; }
             continue;
         }
         if (a == "--mem-backend" && i + 1 < argc) {
@@ -210,12 +225,64 @@ int main(int argc, char** argv) {
         if (cursorIntervalMs == 0) {
             cursorIntervalMs = 1;
         }
+        if (debugPid == 0) {
+            std::cerr << "[Bot] --print-cursor 需要同时指定 --pid\n";
+            return 2;
+        }
+
+        std::shared_ptr<IProcessMemoryReader> debugReader;
+        if (memBackend == "vsock") {
+            debugReader = create_vsock_memory_reader(vsockCid, vsockPort, vsockTimeoutMs);
+        } else {
+            std::cerr << "unsupported --mem-backend in print-cursor: " << memBackend << " (expected vsock)\n";
+            return 2;
+        }
+
+        std::uint64_t dllBase = 0;
+        std::string err;
+        if (!debugReader->query_module_base_by_pid(debugPid, "mhmain.dll", &dllBase, &err)) {
+            std::cerr << "[Bot] print-cursor 查询 mhmain.dll 基址失败: " << err << "\n";
+            return 2;
+        }
+
         std::cout << "[Bot] 光标坐标打印模式已启动（Ctrl+C 停止），interval="
-                  << cursorIntervalMs << "ms\n";
+                  << cursorIntervalMs << "ms"
+                  << " pid=" << debugPid
+                  << " dllBase=0x" << std::hex << dllBase << std::dec << "\n";
         while (!g_stopRequested.load(std::memory_order_relaxed)) {
             POINT pt{};
             if (GetCursorPos(&pt)) {
-                std::cout << "[Cursor] x=" << pt.x << " y=" << pt.y << "\n";
+                const std::uint64_t vaFirstPtr = dllBase + GAME_PIT_CHAIN_BASE_OFFSET;
+                std::uint64_t firstPtr = 0;
+                std::uint32_t rawX = 0;
+                std::uint32_t rawY = 0;
+                std::string readErr;
+                if (!debugReader->read_virtual_by_pid(debugPid, vaFirstPtr, &firstPtr, sizeof(firstPtr), &readErr)) {
+                    std::cerr << "[Cursor] x=" << pt.x << " y=" << pt.y
+                              << " pid=" << debugPid
+                              << " dllBase=0x" << std::hex << dllBase
+                              << " va(first_ptr)=0x" << vaFirstPtr
+                              << std::dec
+                              << " err=" << readErr << "\n";
+                } else {
+                    const std::uint64_t vaRawX = firstPtr + GAME_PIT_POS_STRUCT_OFFSET;
+                    const std::uint64_t vaRawY = vaRawX + sizeof(std::uint32_t);
+                    const bool okX = debugReader->read_virtual_by_pid(debugPid, vaRawX, &rawX, sizeof(rawX), &readErr);
+                    const bool okY = debugReader->read_virtual_by_pid(debugPid, vaRawY, &rawY, sizeof(rawY), &readErr);
+                    std::cout << "[Cursor] x=" << pt.x << " y=" << pt.y
+                              << " pid=" << debugPid
+                              << " dllBase=0x" << std::hex << dllBase
+                              << " va(first_ptr)=0x" << vaFirstPtr
+                              << " firstPtr=0x" << firstPtr
+                              << " va(rawX)=0x" << vaRawX
+                              << " va(rawY)=0x" << vaRawY
+                              << std::dec;
+                    if (okX && okY) {
+                        std::cout << " rawX=" << rawX << " rawY=" << rawY << "\n";
+                    } else {
+                        std::cout << " err=" << readErr << "\n";
+                    }
+                }
             } else {
                 std::cerr << "[Cursor] GetCursorPos failed\n";
             }
