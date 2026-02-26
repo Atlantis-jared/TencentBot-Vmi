@@ -363,7 +363,6 @@ int main(int argc, char** argv) {
     SetConsoleCtrlHandler(ConsoleCtrlHandler, TRUE);
 
     try {
-        bot.init();
         bot.configureRunControl(&g_stopRequested, "bot_checkpoint.json");
 
         WsaInitGuard wsa;
@@ -401,29 +400,56 @@ int main(int argc, char** argv) {
         }
 
         std::atomic_bool remoteQuit{false};
+        std::atomic_bool initRequested{false};
         std::atomic_bool startRequested{false};
-        std::atomic<int> runState{0}; // 0=idle,1=running
+        constexpr int kStateNotInitialized = 0;
+        constexpr int kStateInitializing = 1;
+        constexpr int kStateIdle = 2;
+        constexpr int kStateRunning = 3;
+        constexpr int kStateInitFailed = 4;
+        std::atomic<int> runState{kStateNotInitialized};
 
         std::thread worker([&] {
             while (!remoteQuit.load(std::memory_order_relaxed)) {
-                if (startRequested.exchange(false, std::memory_order_acq_rel)) {
-                    if (runState.load(std::memory_order_relaxed) == 0) {
-                        runState.store(1, std::memory_order_relaxed);
-                        g_stopRequested.store(false, std::memory_order_relaxed);
+                if (initRequested.exchange(false, std::memory_order_acq_rel)) {
+                    const int state = runState.load(std::memory_order_relaxed);
+                    if (state == kStateNotInitialized || state == kStateInitFailed) {
+                        runState.store(kStateInitializing, std::memory_order_relaxed);
                         try {
-                            bot.runTradingRoute();
+                            bot.init();
+                            runState.store(kStateIdle, std::memory_order_relaxed);
                         } catch (const std::exception& e) {
-                            std::cerr << "[Bot] runTradingRoute 异常: " << e.what() << "\n";
+                            std::cerr << "[Bot] init 异常: " << e.what() << "\n";
+                            runState.store(kStateInitFailed, std::memory_order_relaxed);
                         }
-                        runState.store(0, std::memory_order_relaxed);
+                    }
+                }
+
+                if (startRequested.exchange(false, std::memory_order_acq_rel)) {
+                    const int state = runState.load(std::memory_order_relaxed);
+                    if (state != kStateIdle) {
+                        Sleep(20);
+                        continue;
+                    }
+
+                    g_stopRequested.store(false, std::memory_order_relaxed);
+                    runState.store(kStateRunning, std::memory_order_relaxed);
+                    try {
+                        bot.runTradingRoute();
+                    } catch (const std::exception& e) {
+                        std::cerr << "[Bot] runTradingRoute 异常: " << e.what() << "\n";
+                    }
+                    if (!remoteQuit.load(std::memory_order_relaxed)) {
+                        runState.store(kStateIdle, std::memory_order_relaxed);
                     }
                 }
                 Sleep(20);
             }
         });
 
-        std::cout << "[Bot] 初始化完成，远程控制已开启，监听 0.0.0.0:" << remotePort << "\n";
-        std::cout << "[Bot] 指令: START / STOP / STATUS / QUIT\n";
+        std::cout << "[Bot] 远程控制已开启，监听 0.0.0.0:" << remotePort << "\n";
+        std::cout << "[Bot] 当前状态: NOT_INITIALIZED（等待 INIT）\n";
+        std::cout << "[Bot] 指令: INIT / START / STOP / STATUS / QUIT\n";
         while (!remoteQuit.load(std::memory_order_relaxed)) {
             SOCKET clientSock = accept(listenSock, nullptr, nullptr);
             if (clientSock == INVALID_SOCKET) {
@@ -436,10 +462,27 @@ int main(int argc, char** argv) {
             if (rc > 0) {
                 std::string cmd(buf, buf + rc);
                 cmd = upper_ascii(trim(cmd));
-                if (cmd == "START") {
-                    if (runState.load(std::memory_order_relaxed) == 0) {
+                if (cmd == "INIT") {
+                    const int state = runState.load(std::memory_order_relaxed);
+                    if (state == kStateNotInitialized || state == kStateInitFailed) {
+                        initRequested.store(true, std::memory_order_relaxed);
+                        reply = "OK init requested\n";
+                    } else if (state == kStateInitializing) {
+                        reply = "OK initializing\n";
+                    } else {
+                        reply = "OK already initialized\n";
+                    }
+                } else if (cmd == "START") {
+                    const int state = runState.load(std::memory_order_relaxed);
+                    if (state == kStateIdle) {
                         startRequested.store(true, std::memory_order_relaxed);
                         reply = "OK starting\n";
+                    } else if (state == kStateInitializing) {
+                        reply = "ERR still initializing\n";
+                    } else if (state == kStateNotInitialized) {
+                        reply = "ERR not initialized, send INIT first\n";
+                    } else if (state == kStateInitFailed) {
+                        reply = "ERR init failed, send INIT again\n";
                     } else {
                         reply = "OK already running\n";
                     }
@@ -447,7 +490,20 @@ int main(int argc, char** argv) {
                     g_stopRequested.store(true, std::memory_order_relaxed);
                     reply = "OK stop requested\n";
                 } else if (cmd == "STATUS") {
-                    reply = (runState.load(std::memory_order_relaxed) == 0) ? "IDLE\n" : "RUNNING\n";
+                    const int state = runState.load(std::memory_order_relaxed);
+                    if (state == kStateNotInitialized) {
+                        reply = "NOT_INITIALIZED\n";
+                    } else if (state == kStateInitializing) {
+                        reply = "INITIALIZING\n";
+                    } else if (state == kStateIdle) {
+                        reply = "IDLE\n";
+                    } else if (state == kStateRunning) {
+                        reply = "RUNNING\n";
+                    } else if (state == kStateInitFailed) {
+                        reply = "INIT_FAILED\n";
+                    } else {
+                        reply = "UNKNOWN\n";
+                    }
                 } else if (cmd == "QUIT" || cmd == "EXIT") {
                     g_stopRequested.store(true, std::memory_order_relaxed);
                     remoteQuit.store(true, std::memory_order_relaxed);
