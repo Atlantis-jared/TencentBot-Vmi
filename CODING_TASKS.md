@@ -20,13 +20,13 @@
 - [x] 4. **业务层适配**：`GameMemory` 已改为优先读取 `SharedDataStatus`，并在 `--print-cursor` 调试模式输出共享结构体实时值。
 
 ## Phase 3: Host 端改造（独立后端项目）
-- [x] 1. **核心底座迁移与增强**：已新建独立项目 `../TencentBot-vmi-mem-backend`，并实现 `MemflowPhysicalBackend`（默认后端）对接 **`memflow-py`**。
-- [x] 2. **握手管道监听**：`TencentBot-vmi-mem-backend/backend.py` 已实现 `INIT_BIND` 监听（支持 vsock/tcp），收到 Guest 虚拟地址后使用 memflow process 写入。
+- [x] 1. **核心底座迁移与增强**：已新建独立项目 `../TencentBot-vmi-mem-backend-cpp`，并通过 `../TencentBot-vmi-mem-backend/memflow_tool.py` 对接 **`memflow-py`** 真实读写链路。
+- [x] 2. **握手管道监听**：`TencentBot-vmi-mem-backend-cpp/src/main.cpp` 已实现 `INIT_BIND` 监听（支持 vsock/tcp），收到 Guest 虚拟地址后建立 worker 上下文。
 - [x] 3. **暴写循环引擎**：已实现高频注入线程（`--tick-ms` 默认 10ms），循环执行：
-      `从游戏进程地址脱壳读出最新坐标 => 构造带时间戳和 FLAG 的 Payload => 瞬间调用 memflow_process.write_bytes() 向算出偏移的 Guest Bot 地址暴力写入这十几个字节`。
-- [x] 4. **C++ 实现补充**：新增独立项目 `../TencentBot-vmi-mem-backend-cpp`，提供 C++ 版 `INIT_BIND` 服务与 worker 注入循环（`mock`/`command` 后端）。
+      `从游戏进程地址脱壳读出最新坐标 => 构造带时间戳和 FLAG 的 Payload => 瞬间写入 Guest Bot 共享结构体`。
+- [x] 4. **初始化读探针校验**：`INIT_BIND` 新增 `bot_probe_addr/bot_probe_value`，Host 回读 `probe_read_value` 并由 Guest 严格比对，确认“后端确实能读到 Guest 内存”。
 
 ## Phase 4: 编译与联调测试 (最终环节)
 - [ ] 1. 在 Windows 编译全新的 `TencentBot-vmi.exe` 并在虚拟机中启动。
-- [ ] 2. 在 Linux PVE 环境拉起独立注入守护进程（推荐 C++）：`TencentBot-vmi-mem-backend-cpp/tencentbot_mem_backend`（Python 版 `backend.py` 为备选）。
+- [ ] 2. 在 Linux PVE 环境拉起独立注入守护进程（C++）：`TencentBot-vmi-mem-backend-cpp/tencentbot_mem_backend`。
 - [ ] 3. 核对心跳同步标志 `sync_flag` 从 0 变 1，确认无网络包的数据闭环跑通。

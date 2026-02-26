@@ -239,11 +239,10 @@ cmake --build --preset build-release
 ./build/release/tencentbot_mem_backend --transport vsock --listen-cid 2 --listen-port 4050 --backend command --tool /root/workspace/TencentBot-vmi-mem-backend/run_memflow_tool.sh
 ```
 
-### 启动内存后端（备选：Python）
+可先用下列命令验证 Host 已经能读取真实 VM 进程信息：
 
 ```bash
-cd /root/workspace/TencentBot-vmi-mem-backend
-python3 backend.py --transport vsock --listen-cid 2 --listen-port 4050 --backend memflow --memflow-os qemu --memflow-os-args vm101
+/root/workspace/TencentBot-vmi-mem-backend/run_memflow_tool.sh list-procs --limit 20 --filter mh
 ```
 
 ### 基本用法

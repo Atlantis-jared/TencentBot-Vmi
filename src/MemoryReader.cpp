@@ -34,6 +34,7 @@ namespace {
 #endif
 
 constexpr std::size_t kHandshakeReplyMax = 8192;
+volatile std::uint64_t g_bind_probe_value = 0;
 
 struct sockaddr_vm {
     ADDRESS_FAMILY svm_family;
@@ -159,6 +160,32 @@ bool query_module_base_local(std::uint64_t pid, const char* module_name, std::ui
         }
         return false;
     }
+    return true;
+}
+
+bool extract_json_token(const std::string& text, const std::string& key, std::string* out) {
+    if (out == nullptr) return false;
+    const std::string qk = "\"" + key + "\"";
+    const std::size_t key_pos = text.find(qk);
+    if (key_pos == std::string::npos) return false;
+    const std::size_t colon = text.find(':', key_pos + qk.size());
+    if (colon == std::string::npos) return false;
+    std::size_t pos = colon + 1;
+    while (pos < text.size() && std::isspace(static_cast<unsigned char>(text[pos])) != 0) {
+        ++pos;
+    }
+    if (pos >= text.size()) return false;
+    if (text[pos] == '"') {
+        const std::size_t end = text.find('"', pos + 1);
+        if (end == std::string::npos) return false;
+        *out = text.substr(pos + 1, end - pos - 1);
+        return true;
+    }
+    std::size_t end = pos;
+    while (end < text.size() && text[end] != ',' && text[end] != '}' && text[end] != '\r' && text[end] != '\n') {
+        ++end;
+    }
+    *out = text.substr(pos, end - pos);
     return true;
 }
 
@@ -359,11 +386,25 @@ bool VsockMemoryReader::init_bind_once(std::uint64_t target_pid, std::string* er
         }
     }
 
+    // INIT 自检探针：Bot 先写入本地值，要求 Host 反向读取并回传该值。
+    const std::uint64_t probe_value =
+        (static_cast<std::uint64_t>(GetTickCount64()) << 24U) ^
+        static_cast<std::uint64_t>(target_pid) ^
+        static_cast<std::uint64_t>(reinterpret_cast<std::uintptr_t>(&g_shared_data)) ^
+        0xA5A55A5AA55A5A5AULL;
+    g_bind_probe_value = probe_value;
+
     std::ostringstream req;
     req << "{\"cmd\":\"INIT_BIND\",\"data\":{"
         << "\"bot_pid\":" << static_cast<std::uint64_t>(GetCurrentProcessId()) << ","
         << "\"bot_receive_addr\":\"0x" << std::hex
         << reinterpret_cast<std::uintptr_t>(&g_shared_data)
+        << std::dec << "\","
+        << "\"bot_probe_addr\":\"0x" << std::hex
+        << reinterpret_cast<std::uintptr_t>(&g_bind_probe_value)
+        << std::dec << "\","
+        << "\"bot_probe_value\":\"0x" << std::hex
+        << probe_value
         << std::dec << "\","
         << "\"target_game_pid\":" << target_pid << ","
         << "\"target_game_name\":\"mhmain.exe\","
@@ -396,6 +437,32 @@ bool VsockMemoryReader::init_bind_once(std::uint64_t target_pid, std::string* er
     if (!accepted) {
         if (error) {
             *error = "INIT_BIND rejected: " + reply;
+        }
+        return false;
+    }
+
+    std::string probe_read_text;
+    if (!extract_json_token(reply, "probe_read_value", &probe_read_text)) {
+        if (error) {
+            *error = "INIT_BIND missing probe_read_value: " + reply;
+        }
+        return false;
+    }
+    std::uint64_t probe_read_value = 0;
+    try {
+        probe_read_value = std::stoull(probe_read_text, nullptr, 0);
+    } catch (...) {
+        if (error) {
+            *error = "INIT_BIND invalid probe_read_value: " + probe_read_text;
+        }
+        return false;
+    }
+    if (probe_read_value != probe_value) {
+        if (error) {
+            std::ostringstream oss;
+            oss << "INIT_BIND probe mismatch expected=0x" << std::hex << probe_value
+                << " actual=0x" << probe_read_value << std::dec;
+            *error = oss.str();
         }
         return false;
     }
