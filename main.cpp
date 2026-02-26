@@ -7,24 +7,24 @@
 
 #include <iostream>
 #include <atomic>
+#include <memory>
 #include <thread>
 #include <string>
 #include <vector>
-#include <algorithm>
-#include <cctype>
 #include <clocale>
-#include <winsock2.h>
-#include <ws2tcpip.h>
 #include <windows.h>
 #include "src/CheckpointStore.h"
 #include "src/TencentBot.h"
 #include "src/DxgiWindowCapture.h"
 #include "src/CaptchaEngine.h"
 #include "src/MemoryReader.h"
-
-#pragma comment(lib, "Ws2_32.lib")
+#include "src/runtime/RuntimeController.h"
 
 TencentBot bot;
+// 全局停止标志：
+// - 控制台 Ctrl+C 会置位
+// - 远程 STOP 指令会置位
+// - 业务线程在关键循环中轮询该标志并安全退出
 static std::atomic_bool g_stopRequested{false};
 
 static BOOL WINAPI ConsoleCtrlHandler(DWORD ctrlType) {
@@ -35,13 +35,16 @@ static BOOL WINAPI ConsoleCtrlHandler(DWORD ctrlType) {
         case CTRL_LOGOFF_EVENT:
         case CTRL_SHUTDOWN_EVENT:
             g_stopRequested.store(true, std::memory_order_relaxed);
-            return TRUE; // handled (let app stop safely and checkpoint)
+            // 已处理，交由业务层走“安全收尾 + checkpoint 保存”流程。
+            return TRUE;
         default:
             return FALSE;
     }
 }
 
 namespace {
+    // 启动参数帮助：
+    // 既覆盖 checkpoint 维护，也覆盖调试模式和远程控制模式。
     void printCheckpointHelp() {
         std::cout <<
 R"(Checkpoint tools:
@@ -67,10 +70,13 @@ next_op 对应关系（v3）:
 )";
     }
 
+    // 通用整数解析（十进制），用于 checkpoint 相关参数。
     bool parseInt(const std::string& s, int& out) {
         try { out = std::stoi(s); return true; } catch (...) { return false; }
     }
 
+    // 无符号 32 位解析：
+    // base=0 允许十进制和 0x 前缀十六进制。
     bool parseU32(const std::string& s, uint32_t& out) {
         try {
             const auto v = std::stoull(s, nullptr, 0);
@@ -82,6 +88,7 @@ next_op 对应关系（v3）:
         }
     }
 
+    // 无符号 64 位解析（支持 0x 前缀）。
     bool parseU64(const std::string& s, uint64_t& out) {
         try {
             out = std::stoull(s, nullptr, 0);
@@ -91,54 +98,23 @@ next_op 对应关系（v3）:
         }
     }
 
-    std::string trim(const std::string& s) {
-        std::size_t begin = 0;
-        while (begin < s.size() && std::isspace(static_cast<unsigned char>(s[begin])) != 0) {
-            ++begin;
-        }
-        std::size_t end = s.size();
-        while (end > begin && std::isspace(static_cast<unsigned char>(s[end - 1])) != 0) {
-            --end;
-        }
-        return s.substr(begin, end - begin);
-    }
-
-    std::string upper_ascii(std::string s) {
-        std::transform(s.begin(), s.end(), s.begin(), [](unsigned char c) {
-            return static_cast<char>(std::toupper(c));
-        });
-        return s;
-    }
-
-    class WsaInitGuard {
-    public:
-        WsaInitGuard() {
-            WSADATA wsa{};
-            ok_ = (WSAStartup(MAKEWORD(2, 2), &wsa) == 0);
-        }
-
-        ~WsaInitGuard() {
-            if (ok_) {
-                WSACleanup();
-            }
-        }
-
-        bool ok() const { return ok_; }
-
-    private:
-        bool ok_ = false;
-    };
 } // namespace
 
 int main(int argc, char** argv) {
 #ifdef _WIN32
-    // Keep console code page aligned with /utf-8 string literals.
+    // 控制台编码与源码 UTF-8 字符串保持一致，避免中文日志乱码。
     SetConsoleOutputCP(CP_UTF8);
     SetConsoleCP(CP_UTF8);
 #endif
     std::setlocale(LC_ALL, ".UTF-8");
 
-    // Parse args for checkpoint management (no HV required)
+    // -----------------------------
+    // 第一阶段：解析命令行参数
+    // -----------------------------
+    // 说明：
+    // 1) 该阶段不触发任何外部依赖（不连 vsock，不初始化 bot）
+    // 2) checkpoint 工具类参数可“只读/只改后立即退出”
+    // 3) --print-cursor 属于独立调试模式，也会提前退出
     std::string checkpointPath = "bot_checkpoint.json";
     bool showCk = false;
     bool resetCk = false;
@@ -198,6 +174,9 @@ int main(int argc, char** argv) {
             continue;
         }
         if (a == "--remote-control") {
+            // 兼容旧参数：
+            // 当前版本默认即启用 RuntimeController，因此该参数仅保留占位，
+            // 避免旧脚本报错。
             continue;
         }
         if (a == "--remote-port" && i + 1 < argc) {
@@ -226,6 +205,10 @@ int main(int argc, char** argv) {
     }
 
     if (showCk || resetCk || setSomething) {
+        // -----------------------------
+        // 第二阶段：checkpoint 维护模式
+        // -----------------------------
+        // 命中该分支时，执行完对应操作后直接退出，不进入 bot 主流程。
         CheckpointStore store(checkpointPath);
         TradingCheckpoint ck;
         std::string err;
@@ -242,7 +225,7 @@ int main(int argc, char** argv) {
         }
 
         if (setSomething) {
-            // if no existing ck, start from defaults v3
+            // 若当前不存在 checkpoint，则从默认 v3 结构创建。
             if (!has) ck = TradingCheckpoint{};
             ck.version = 3;
             if (forceNextOp) ck.next_op = forced.next_op;
@@ -279,6 +262,13 @@ int main(int argc, char** argv) {
     }
 
     if (printCursor) {
+        // -----------------------------
+        // 第三阶段：光标/内存链调试模式
+        // -----------------------------
+        // 该模式用于在线验证：
+        // - Win32 鼠标位置（GetCursorPos）
+        // - 游戏内存链坐标（dllBase + pointer chain）
+        // 两者会并行打印，便于快速确认偏移与读链是否正确。
         SetConsoleCtrlHandler(ConsoleCtrlHandler, TRUE);
         if (cursorIntervalMs == 0) {
             cursorIntervalMs = 1;
@@ -310,6 +300,7 @@ int main(int argc, char** argv) {
         while (!g_stopRequested.load(std::memory_order_relaxed)) {
             POINT pt{};
             if (GetCursorPos(&pt)) {
+                // 一级指针：mhmain.dll + 链表基址偏移
                 const std::uint64_t vaFirstPtr = dllBase + GAME_PIT_CHAIN_BASE_OFFSET;
                 std::uint64_t firstPtr = 0;
                 std::uint32_t rawX = 0;
@@ -323,6 +314,7 @@ int main(int argc, char** argv) {
                               << std::dec
                               << " err=" << readErr << "\n";
                 } else {
+                    // 二级地址：角色坐标结构体 (rawX/rawY)
                     const std::uint64_t vaRawX = firstPtr + GAME_PIT_POS_STRUCT_OFFSET;
                     const std::uint64_t vaRawY = vaRawX + sizeof(std::uint32_t);
                     const bool okX = debugReader->read_virtual_by_pid(debugPid, vaRawX, &rawX, sizeof(rawX), &readErr);
@@ -349,6 +341,10 @@ int main(int argc, char** argv) {
         return 0;
     }
 
+    // -----------------------------
+    // 第四阶段：正式运行模式
+    // -----------------------------
+    // 创建进程内存读取后端，并注入到 gameMemory。
     std::shared_ptr<IProcessMemoryReader> reader;
     if (memBackend == "vsock") {
         reader = create_vsock_memory_reader(vsockCid, vsockPort, vsockTimeoutMs);
@@ -363,169 +359,26 @@ int main(int argc, char** argv) {
     SetConsoleCtrlHandler(ConsoleCtrlHandler, TRUE);
 
     try {
+        // 运行控制接线说明：
+        // - init 回调：只做初始化（不自动开跑）
+        // - run  回调：真正执行跑商循环
+        // - stop 回调：只置停止标志，不做阻塞操作
+        // RuntimeController 负责接收 TCP 指令并驱动这三类回调。
         bot.configureRunControl(&g_stopRequested, "bot_checkpoint.json");
-
-        WsaInitGuard wsa;
-        if (!wsa.ok()) {
-            std::cerr << "[Bot] 远程控制启动失败: WSAStartup 失败\n";
-            return 2;
-        }
-
-        SOCKET listenSock = socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
-        if (listenSock == INVALID_SOCKET) {
-            std::cerr << "[Bot] 远程控制启动失败: socket 创建失败\n";
-            return 2;
-        }
-
-        auto closeSock = [](SOCKET& s) {
-            if (s != INVALID_SOCKET) {
-                closesocket(s);
-                s = INVALID_SOCKET;
-            }
-        };
-
-        sockaddr_in addr{};
-        addr.sin_family = AF_INET;
-        addr.sin_port = htons(static_cast<u_short>(remotePort));
-        addr.sin_addr.s_addr = htonl(INADDR_ANY);
-        if (bind(listenSock, reinterpret_cast<sockaddr*>(&addr), sizeof(addr)) == SOCKET_ERROR) {
-            std::cerr << "[Bot] 远程控制启动失败: bind 端口 " << remotePort << " 失败\n";
-            closeSock(listenSock);
-            return 2;
-        }
-        if (listen(listenSock, 8) == SOCKET_ERROR) {
-            std::cerr << "[Bot] 远程控制启动失败: listen 失败\n";
-            closeSock(listenSock);
-            return 2;
-        }
-
-        std::atomic_bool remoteQuit{false};
-        std::atomic_bool initRequested{false};
-        std::atomic_bool startRequested{false};
-        constexpr int kStateNotInitialized = 0;
-        constexpr int kStateInitializing = 1;
-        constexpr int kStateIdle = 2;
-        constexpr int kStateRunning = 3;
-        constexpr int kStateInitFailed = 4;
-        std::atomic<int> runState{kStateNotInitialized};
-
-        std::thread worker([&] {
-            while (!remoteQuit.load(std::memory_order_relaxed)) {
-                if (initRequested.exchange(false, std::memory_order_acq_rel)) {
-                    const int state = runState.load(std::memory_order_relaxed);
-                    if (state == kStateNotInitialized || state == kStateInitFailed) {
-                        runState.store(kStateInitializing, std::memory_order_relaxed);
-                        try {
-                            bot.init();
-                            runState.store(kStateIdle, std::memory_order_relaxed);
-                        } catch (const std::exception& e) {
-                            std::cerr << "[Bot] init 异常: " << e.what() << "\n";
-                            runState.store(kStateInitFailed, std::memory_order_relaxed);
-                        }
-                    }
-                }
-
-                if (startRequested.exchange(false, std::memory_order_acq_rel)) {
-                    const int state = runState.load(std::memory_order_relaxed);
-                    if (state != kStateIdle) {
-                        Sleep(20);
-                        continue;
-                    }
-
-                    g_stopRequested.store(false, std::memory_order_relaxed);
-                    runState.store(kStateRunning, std::memory_order_relaxed);
-                    try {
-                        bot.runTradingRoute();
-                    } catch (const std::exception& e) {
-                        std::cerr << "[Bot] runTradingRoute 异常: " << e.what() << "\n";
-                    }
-                    if (!remoteQuit.load(std::memory_order_relaxed)) {
-                        runState.store(kStateIdle, std::memory_order_relaxed);
-                    }
-                }
-                Sleep(20);
-            }
-        });
-
-        std::cout << "[Bot] 远程控制已开启，监听 0.0.0.0:" << remotePort << "\n";
-        std::cout << "[Bot] 当前状态: NOT_INITIALIZED（等待 INIT）\n";
-        std::cout << "[Bot] 指令: INIT / START / STOP / STATUS / QUIT\n";
-        while (!remoteQuit.load(std::memory_order_relaxed)) {
-            SOCKET clientSock = accept(listenSock, nullptr, nullptr);
-            if (clientSock == INVALID_SOCKET) {
-                break;
-            }
-
-            char buf[256] = {};
-            const int rc = recv(clientSock, buf, static_cast<int>(sizeof(buf) - 1), 0);
-            std::string reply = "ERR empty command\n";
-            if (rc > 0) {
-                std::string cmd(buf, buf + rc);
-                cmd = upper_ascii(trim(cmd));
-                if (cmd == "INIT") {
-                    const int state = runState.load(std::memory_order_relaxed);
-                    if (state == kStateNotInitialized || state == kStateInitFailed) {
-                        initRequested.store(true, std::memory_order_relaxed);
-                        reply = "OK init requested\n";
-                    } else if (state == kStateInitializing) {
-                        reply = "OK initializing\n";
-                    } else {
-                        reply = "OK already initialized\n";
-                    }
-                } else if (cmd == "START") {
-                    const int state = runState.load(std::memory_order_relaxed);
-                    if (state == kStateIdle) {
-                        startRequested.store(true, std::memory_order_relaxed);
-                        reply = "OK starting\n";
-                    } else if (state == kStateInitializing) {
-                        reply = "ERR still initializing\n";
-                    } else if (state == kStateNotInitialized) {
-                        reply = "ERR not initialized, send INIT first\n";
-                    } else if (state == kStateInitFailed) {
-                        reply = "ERR init failed, send INIT again\n";
-                    } else {
-                        reply = "OK already running\n";
-                    }
-                } else if (cmd == "STOP") {
-                    g_stopRequested.store(true, std::memory_order_relaxed);
-                    reply = "OK stop requested\n";
-                } else if (cmd == "STATUS") {
-                    const int state = runState.load(std::memory_order_relaxed);
-                    if (state == kStateNotInitialized) {
-                        reply = "NOT_INITIALIZED\n";
-                    } else if (state == kStateInitializing) {
-                        reply = "INITIALIZING\n";
-                    } else if (state == kStateIdle) {
-                        reply = "IDLE\n";
-                    } else if (state == kStateRunning) {
-                        reply = "RUNNING\n";
-                    } else if (state == kStateInitFailed) {
-                        reply = "INIT_FAILED\n";
-                    } else {
-                        reply = "UNKNOWN\n";
-                    }
-                } else if (cmd == "QUIT" || cmd == "EXIT") {
-                    g_stopRequested.store(true, std::memory_order_relaxed);
-                    remoteQuit.store(true, std::memory_order_relaxed);
-                    reply = "OK quitting\n";
-                } else {
-                    reply = "ERR unknown command\n";
-                }
-            }
-            send(clientSock, reply.data(), static_cast<int>(reply.size()), 0);
-            closeSock(clientSock);
-        }
-
-        remoteQuit.store(true, std::memory_order_relaxed);
-        g_stopRequested.store(true, std::memory_order_relaxed);
-        if (worker.joinable()) {
-            worker.join();
-        }
-        closeSock(listenSock);
+        runtime::ServerOptions options{};
+        options.port = remotePort;
+        runtime::RuntimeController controller(
+            options,
+            [&]() { bot.init(); },
+            [&]() {
+                g_stopRequested.store(false, std::memory_order_relaxed);
+                bot.runTradingRoute();
+            },
+            [&]() { g_stopRequested.store(true, std::memory_order_relaxed); }
+        );
+        return controller.RunBlocking();
     } catch (const std::exception& e) {
         std::cerr << "[Bot] 异常退出: " << e.what() << "\n";
         return -2;
     }
-
-    return 0;
 }

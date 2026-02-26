@@ -2,6 +2,7 @@
 // TencentBot.cpp — 跑商机器人主类实现（Part 1: 初始化 + 底层操作 + 导航路线）
 // =============================================================================
 #include "TencentBot.h"
+#include "bt/BehaviorTree.h"
 #include "BotLogger.h"
 #include "CheckpointStore.h"
 
@@ -22,9 +23,11 @@
 #include <functional>
 #include <iostream>
 #include <map>
+#include <memory>
 #include <sstream>
 #include <stdexcept>
 #include <tlhelp32.h>
+#include <utility>
 #include <opencv2/core/mat.hpp>
 #include <opencv2/imgcodecs.hpp>
 #include <opencv2/imgproc.hpp>
@@ -91,6 +94,15 @@ namespace {
     }
     [[noreturn]] void throwGoalReached() { throw GoalReachedException{}; }
 
+    // 输入驱动自检（仅初始化阶段调用）：
+    // 1) 用 Win32 API 读取当前鼠标位置（before）
+    // 2) 通过 IbInputSimulator 做一次相对移动
+    // 3) 再次读取位置（after），校验方向与幅度是否符合预期
+    // 4) 将鼠标移回原位，避免影响后续业务点击
+    //
+    // 设计目标：
+    // - 提前发现“驱动已加载但实际不生效”的场景
+    // - 将问题暴露在 init()，而不是跑商过程中才随机失败
     bool verifyIbMouseRelativeMove(std::string* reason) {
         POINT before{};
         if (!GetCursorPos(&before)) {
@@ -110,11 +122,13 @@ namespace {
         if (dx == 0) dx = 40;
         if (dy == 0) dy = 28;
 
+        // 发送一次相对移动，验证底层驱动链路是否可用。
         if (!IbSendMouseMove(static_cast<uint32_t>(dx), static_cast<uint32_t>(dy), Send::MoveMode::Relative)) {
             if (reason) *reason = "IbSendMouseMove(relative test move) failed";
             return false;
         }
 
+        // 给系统一点时间刷新指针位置（不同虚拟化环境延迟不同）。
         Sleep(40);
 
         POINT after{};
@@ -126,6 +140,10 @@ namespace {
         const int movedX = after.x - before.x;
         const int movedY = after.y - before.y;
 
+        // 校验策略：
+        // - 方向一致（符号一致）
+        // - 幅度至少达到目标值的一半，且不低于最小阈值
+        //   （避免某些环境下被平滑/加速导致轻微衰减）
         const bool signXOk = (dx == 0) || (movedX == 0 ? false : ((movedX > 0) == (dx > 0)));
         const bool signYOk = (dy == 0) || (movedY == 0 ? false : ((movedY > 0) == (dy > 0)));
         const bool magXOk = std::abs(movedX) >= std::max(6, std::abs(dx) / 2);
@@ -151,6 +169,7 @@ namespace {
         }
         return ok;
     }
+
 }
 
 // =============================================================================
@@ -1386,64 +1405,109 @@ void TencentBot::runTradingRoute() {
         BOT_LOG("TencentBot", "checkpoint 已迁移到 v3");
     }
 
-    if (ck.is_goal_reached) {
-        BOT_LOG("TencentBot", "发现目标已达成，直接执行回帮步骤...");
-        try {
-            step6_returnAndSubmit();
-        } catch (const GoalReachedException&) {
-            BOT_LOG("TencentBot", "========== 跑商完成 (断点恢复) ==========");
-            return;
-        } catch (const StopRequestedException&) {
-            return;
-        }
-    }
-
     if (ck.next_op < 0) ck.next_op = 0;
     if (ck.next_op > static_cast<int>(steps.size())) ck.next_op = static_cast<int>(steps.size());
 
     // 后续循环跳过 step0（出帮派），从 step1 开始
     constexpr int kCycleRestartFromStep = 1;
 
-    // --- 主循环 ---
-    try {
-        while (true) {
-            // 如果已达标，强制执行回帮步骤（这通常在 startup 或 tryReturnToGangIfReached 触发）
-            // 但如果因为某种原因没能成功完成（比如地图识别失败），循环回来后要继续尝试
-            if (ck.is_goal_reached) {
-                step6_returnAndSubmit();
-                // 如果回帮函数返回了而没抛出 GoalReachedException，说明可能还没成功
-                BOT_WARN("TencentBot", "回帮步骤未完成，等待 5 秒后重试...");
-                Sleep(5000);
-                continue;
-            }
+    // --- 行为树版本主循环 ---
+    // 节点设计：
+    // 1) goal_branch: 目标达成后执行“回帮派并提交”
+    // 2) step_branch: 正常执行当前 next_op
+    // 根节点使用 Selector，优先尝试 goal_branch，失败后走 step_branch。
+    auto btGoalCondition = [&]() -> bool {
+        return ck.is_goal_reached;
+    };
 
-            for (int i = ck.next_op; i < static_cast<int>(steps.size()); ++i) {
-                checkStop(stopSignal_);
-                BOT_LOG("TencentBot", "=== step " << i << "/" << steps.size()
-                        << " : " << steps[i].name << " (cycle=" << ck.cycle << ") ===");
-                steps[i].execute();
-                
-                // 执行完步骤后再次检查达标状态，防止在步骤内部已达标但未抛出异常的情况
-                if (ck.is_goal_reached) break;
+    // 当银票达标后，该动作负责执行最终提交流程。
+    // step6_returnAndSubmit 内部在成功时会抛 GoalReachedException 结束主循环。
+    auto btGoalAction = [&]() -> bt::Status {
+        step6_returnAndSubmit();
+        // 理论上若未抛异常，说明流程未真正收敛；短暂等待后让下一 tick 重试。
+        BOT_WARN("TencentBot", "回帮步骤未完成，等待 5 秒后重试...");
+        Sleep(5000);
+        return bt::Status::Success;
+    };
 
-                ck.next_op = i + 1;
-                ck.last_op_name = steps[i].name;
-                (void)store.save(ck);
-            }
+    // 每次 tick 推进一个业务 step：
+    // - 读取 ck.next_op
+    // - 执行对应步骤
+    // - 持久化 checkpoint
+    // - 到末尾则进入下一轮 cycle
+    auto btStepAction = [&]() -> bt::Status {
+        if (steps.empty()) {
+            return bt::Status::Failure;
+        }
 
-            if (ck.is_goal_reached) continue; // 回到 while 顶部的 is_goal_reached 处理
+        if (ck.next_op < 0) ck.next_op = 0;
+        if (ck.next_op > static_cast<int>(steps.size())) ck.next_op = static_cast<int>(steps.size());
 
-            // 未达标，开始下一轮（跳过出帮派步骤）
+        if (ck.next_op >= static_cast<int>(steps.size())) {
+            // 一轮 step 执行完且未达标：进入下一轮（从 step1 开始）。
             ck.cycle += 1;
             ck.next_op = kCycleRestartFromStep;
             ck.last_op_name = "cycle_restart";
             (void)store.save(ck);
             BOT_LOG("TencentBot", "未达标，继续下一轮 cycle=" << ck.cycle);
+            return bt::Status::Success;
+        }
+
+        const int i = ck.next_op;
+        checkStop(stopSignal_);
+        BOT_LOG("TencentBot", "=== step " << i << "/" << steps.size()
+                << " : " << steps[i].name << " (cycle=" << ck.cycle << ") ===");
+        steps[i].execute();
+
+        if (!ck.is_goal_reached) {
+            // 仅在未达标时推进断点；达标分支会由 goal_branch 接管。
+            ck.next_op = i + 1;
+            ck.last_op_name = steps[i].name;
+            (void)store.save(ck);
+        }
+        return bt::Status::Success;
+    };
+
+    // 行为树节点状态观测：
+    // 仅在状态变化时打日志，避免每 tick 刷屏。
+    std::map<std::string, bt::Status> btLastStatus;
+    auto btObserver = [&](std::string_view node, bt::Status status) {
+        const std::string key(node);
+        auto it = btLastStatus.find(key);
+        if (it == btLastStatus.end() || it->second != status) {
+            btLastStatus[key] = status;
+            BOT_LOG("BehaviorTree", "node=" << key << " status=" << bt::status_to_cstr(status));
+        }
+    };
+
+    // 构建 goal 分支：Condition + Action 的顺序节点。
+    std::vector<std::unique_ptr<bt::Node>> goalChildren;
+    goalChildren.emplace_back(std::make_unique<bt::Condition>("goal_reached?", btGoalCondition, btObserver));
+    goalChildren.emplace_back(std::make_unique<bt::Action>("return_and_submit", btGoalAction, btObserver));
+
+    // 构建根节点：优先走 goal_branch，否则执行常规 step_branch。
+    std::vector<std::unique_ptr<bt::Node>> rootChildren;
+    rootChildren.emplace_back(std::make_unique<bt::Sequence>("goal_branch", std::move(goalChildren), btObserver));
+    rootChildren.emplace_back(std::make_unique<bt::Action>("step_branch", btStepAction, btObserver));
+    std::unique_ptr<bt::Node> root = std::make_unique<bt::Selector>("route_root", std::move(rootChildren), btObserver);
+
+    try {
+        // 主循环只负责 tick 行为树，不直接做业务分支判断。
+        // 所有业务状态推进由节点动作内部完成。
+        while (true) {
+            checkStop(stopSignal_);
+            const bt::Status status = root->tick();
+            if (status == bt::Status::Failure) {
+                BOT_WARN("TencentBot", "行为树 tick 失败，1 秒后重试");
+                Sleep(1000);
+            }
         }
     } catch (const StopRequestedException&) {
+        // 收到停止信号时，保证 checkpoint 至少落盘一次。
         (void)store.save(ck);
         BOT_LOG("TencentBot", "已请求停止，checkpoint 已保存 (next_op=" << ck.next_op << ")");
     } catch (const GoalReachedException&) {
+        // 目标达成是正常业务收尾，不视为异常错误。
         BOT_LOG("TencentBot", "========== 跑商完成 ==========");
     }
 }

@@ -27,6 +27,8 @@ add_executable(untitled
         src/GameMemory.cpp
         src/VisionEngine.cpp
         src/MemoryReader.cpp
+        src/bt/BehaviorTree.cpp
+        src/runtime/RuntimeController.cpp
 )
 
 add_subdirectory(./IbInputSimulator/Simulator)
