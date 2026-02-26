@@ -52,11 +52,13 @@
 - 每个 `tick` 最多推进一个业务步骤，`next_op` 作为分发条件
 - `goal_branch` 优先级高于普通步骤分支（达标后立即回帮提交）
 - `cycle_restart_if_needed` 仅在 `next_op == steps.size()` 时触发新一轮 cycle
+- 长耗时动作采用“异步启动 + Running 轮询”实现，`tick()` 本身保持非阻塞
 
 收益：
 
 - 业务步骤可插拔
 - checkpoint 推进逻辑统一
+- 控制面（STOP/STATUS）响应更及时
 - goal 分支与普通执行分支解耦
 
 ## 4. 可靠性基线

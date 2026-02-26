@@ -3,6 +3,9 @@
 #include "../bt/BehaviorTree.h"
 #include "../bt/StepDispatchTree.h"
 
+#include <chrono>
+#include <future>
+#include <memory>
 #include <stdexcept>
 #include <utility>
 
@@ -26,6 +29,41 @@ TreeStatus from_bt_status(bt::Status status) {
         case bt::Status::Running: return TreeStatus::Running;
         default: return TreeStatus::Failure;
     }
+}
+
+// 将一次可能阻塞的业务动作包装为“非阻塞 tick”语义：
+// - 第一次 tick：异步启动任务并立即返回 Running
+// - 后续 tick：轮询 future，未完成继续 Running
+// - 完成后：返回任务最终状态，并清理为下一次可重入
+std::function<bt::Status()> make_nonblocking_action(std::function<TreeStatus()> fn) {
+    struct AsyncState {
+        bool active = false;
+        std::future<TreeStatus> future;
+    };
+    auto state = std::make_shared<AsyncState>();
+
+    return [fn = std::move(fn), state]() mutable -> bt::Status {
+        if (!fn) {
+            return bt::Status::Failure;
+        }
+        if (!state->active) {
+            state->future = std::async(std::launch::async, [fn]() mutable {
+                return fn();
+            });
+            state->active = true;
+            return bt::Status::Running;
+        }
+
+        const auto ready = state->future.wait_for(std::chrono::milliseconds(0));
+        if (ready != std::future_status::ready) {
+            return bt::Status::Running;
+        }
+
+        // get() 会把后台任务异常重新抛到 tick 线程，交由上层统一处理。
+        const TreeStatus final_status = state->future.get();
+        state->active = false;
+        return to_bt_status(final_status);
+    };
 }
 
 } // namespace
@@ -56,12 +94,7 @@ public:
         ));
         goal_children.emplace_back(std::make_unique<bt::Action>(
             "return_and_submit",
-            [goal_action = std::move(ctx.run_goal_action)]() {
-                if (!goal_action) {
-                    return bt::Status::Failure;
-                }
-                return to_bt_status(goal_action());
-            },
+            make_nonblocking_action(std::move(ctx.run_goal_action)),
             bt_observer
         ));
 
@@ -70,12 +103,7 @@ public:
         for (auto& step : ctx.steps) {
             dispatch_items.push_back(bt::StepDispatchItem{
                 std::move(step.name),
-                [run = std::move(step.run)]() {
-                    if (!run) {
-                        return bt::Status::Failure;
-                    }
-                    return to_bt_status(run());
-                }
+                make_nonblocking_action(std::move(step.run))
             });
         }
 
@@ -141,4 +169,3 @@ void RunTradingRouteTreeLoop(
 }
 
 } // namespace domain
-

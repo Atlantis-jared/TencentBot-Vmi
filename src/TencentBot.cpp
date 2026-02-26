@@ -1507,8 +1507,8 @@ void TencentBot::runTradingRoute() {
         domain::RunTradingRouteTreeLoop(
             behavior,
             [&]() {
-                if (ck.next_op < 0) ck.next_op = 0;
-                if (ck.next_op > static_cast<int>(steps.size())) ck.next_op = static_cast<int>(steps.size());
+                // 非阻塞行为树模式下，step 动作在后台执行；
+                // 这里仅做停止检查，避免与后台动作并发读写 checkpoint 状态。
                 checkStop(stopSignal_);
             },
             [&]() {
