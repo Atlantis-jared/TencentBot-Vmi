@@ -1,0 +1,33 @@
+{
+  "timing": {
+    "key_action_delay_ms": 100,
+    "ui_update_delay_ms": 1000,
+    "map_change_delay_ms": 1500,
+    "ui_click_delay_ms": 1000,
+    "trade_confirm_delay_ms": 1000
+  },
+  "window_offset": {
+    "x": -6,
+    "y": -57
+  },
+  "trade_threshold": {
+    "paper_buy_price_max": 2600,
+    "oil_buy_price_max": 3600,
+    "paper_sell_profit_ratio": 1.5,
+    "oil_sell_profit_ratio": 1.5
+  },
+  "map_properties": {
+    "jianyecheng": { "uiPixelWidth": 556, "uiPixelHeight": 277, "gameCoordMaxX": 288, "gameCoordMaxY": 144 },
+    "donghaiwan": { "uiPixelWidth": 276, "uiPixelHeight": 276, "gameCoordMaxX": 119, "gameCoordMaxY": 119 },
+    "changancheng": { "uiPixelWidth": 545, "uiPixelHeight": 276, "gameCoordMaxX": 548, "gameCoordMaxY": 278 },
+    "difu": { "uiPixelWidth": 369, "uiPixelHeight": 276, "gameCoordMaxX": 159, "gameCoordMaxY": 119 },
+    "huaguoshan": { "uiPixelWidth": 369, "uiPixelHeight": 276, "gameCoordMaxX": 159, "gameCoordMaxY": 119 },
+    "nvbamu": { "uiPixelWidth": 220, "uiPixelHeight": 230, "gameCoordMaxX": 95, "gameCoordMaxY": 143 },
+    "donghaiyandong": { "uiPixelWidth": 550, "uiPixelHeight": 258, "gameCoordMaxX": 191, "gameCoordMaxY": 89 },
+    "aolaiguo": { "uiPixelWidth": 410, "uiPixelHeight": 276, "gameCoordMaxX": 223, "gameCoordMaxY": 150 },
+    "datangguojing": { "uiPixelWidth": 377, "uiPixelHeight": 360, "gameCoordMaxX": 351, "gameCoordMaxY": 335 },
+    "chishuizhou": { "uiPixelWidth": 510, "uiPixelHeight": 303, "gameCoordMaxX": 161, "gameCoordMaxY": 95 },
+    "beijuluzhou": { "uiPixelWidth": 367, "uiPixelHeight": 276, "gameCoordMaxX": 227, "gameCoordMaxY": 169 }
+  }
+}
+

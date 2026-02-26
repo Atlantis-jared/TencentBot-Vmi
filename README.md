@@ -46,14 +46,23 @@
 │   ├── BotLogger.h            # 统一日志宏（BOT_LOG / BOT_WARN / BOT_ERR）
 │   ├── GameMemory.h / .cpp    # 内存读取层：CR3 管理 + 角色坐标读取/换算
 │   ├── VisionEngine.h / .cpp  # 视觉引擎：截图 + 地图识别 + NPC 查找
-│   ├── TencentBot.h / .cpp    # 主调度器：路线导航 + 交易逻辑 + 跑商循环
+│   ├── TencentBot.h            # 主类声明
+│   ├── TencentBot.Core.cpp     # 初始化/生命周期
+│   ├── TencentBot.Motion.cpp   # 输入控制/寻路/传送
+│   ├── TencentBot.Routes.cpp   # 路线段与恢复路线
+│   ├── TencentBot.TradeOps.cpp # 交易读写与买卖流程
+│   ├── TencentBot.TradingRoute.cpp # 跑商行为树编排
+│   ├── TencentBot.Captcha.cpp  # 银票提交成语验证
 │   ├── DxgiWindowCapture.h/.cpp  # DXGI 屏幕截图
 │   ├── CaptchaEngine.h / .cpp # AI 文字/数字识别（HTTP 客户端 → 本地服务）
-│   └── CheckpointStore.h/.cpp # JSON 断点存储
+│   ├── CheckpointStore.h/.cpp # JSON 断点存储
+│   ├── config/BotSettings.h/.cpp # 运行参数配置加载
+│   └── domain/MapProperties.h # 地图参数结构
 ├── assets/
 │   ├── maps/                  # 地图识别模板（12 张 .png）
 │   ├── mapsui/                # 小地图 UI 模板（11 张，含昼夜变体）
-│   └── npc/                   # NPC / 按钮 / 物品模板（20 张 .png）
+│   ├── npc/                   # NPC / 按钮 / 物品模板（20 张 .png）
+│   └── config/bot_settings.json # 可配置参数（时间/阈值/地图参数）
 ├── IbInputSimulator/          # 鼠标/键盘模拟器（Logitech 驱动）
 ├── CMakeLists.txt             # CMake 构建配置
 └── vcpkg.json                 # vcpkg 依赖清单
@@ -123,7 +132,7 @@ GameCoord.y = (kMapYBase[mapName] - rawY) / 20
 
 模板文件在编译后自动复制到输出目录（`maps/`、`npcs/`、`mapsui/`）。
 
-#### TencentBot（`TencentBot.h/.cpp`）
+#### TencentBot（`TencentBot.*.cpp`）
 
 高层调度器，不直接接触底层 API：
 
@@ -199,6 +208,7 @@ cmake --build build --config Release
 - `untitled.exe` — 主程序
 - `IbInputSimulator.dll` — 输入模拟器
 - `maps/`、`npcs/`、`mapsui/` — 模板图片（自动复制）
+- `config/bot_settings.json` — 运行配置文件（自动复制）
 
 ---
 
@@ -257,7 +267,7 @@ cmake --build build --config Release
 
 1. 截取地图特征区域，保存为 `assets/maps/地图名.png`
 2. 截取小地图 UI，保存为 `assets/mapsui/地图名.png`（如有夜间版另存 `地图名1.png`）
-3. 在 `TencentBot.cpp` 的 `MAP_PROPERTIES` 中添加条目：
+3. 在 `assets/config/bot_settings.json` 的 `map_properties` 中添加条目：
    ```cpp
    {"地图名", {UI宽度, UI高度, 游戏坐标X最大值, 游戏坐标Y最大值}},
    ```

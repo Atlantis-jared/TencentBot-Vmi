@@ -13,7 +13,17 @@
 
 - 控制层不能直接调用底层细节（只通过 `TencentBot::init/runTradingRoute`）
 - 策略层不能直接访问网络层
-- 业务文件 `TencentBot.cpp` 不直接依赖 `src/bt/*`，统一通过 `src/domain/TradingRouteBehavior.*` 门面访问行为树
+- 业务层不直接依赖 `src/bt/*`，统一通过 `src/domain/TradingRouteBehavior.*` 门面访问行为树
+
+实现拆分（当前）：
+
+- `src/TencentBot.Core.cpp`：初始化、驱动自检、生命周期基础能力
+- `src/TencentBot.Motion.cpp`：底层输入、寻路、传送辅助
+- `src/TencentBot.Routes.cpp`：地图段路线与恢复路线
+- `src/TencentBot.TradeOps.cpp`：交易面板识别与买卖操作
+- `src/TencentBot.TradingRoute.cpp`：跑商行为树主循环编排
+- `src/TencentBot.Captcha.cpp`：银票提交成语验证
+- `src/config/BotSettings.*`：可配置参数加载（时间、阈值、窗口偏移、地图参数）
 
 ## 2. 生命周期状态机
 

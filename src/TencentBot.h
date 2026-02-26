@@ -27,18 +27,7 @@
 #include "DxgiWindowCapture.h"
 #include "GameMemory.h"
 #include "VisionEngine.h"
-#include "../IbInputSimulator/Simulator/include/IbInputSimulator/InputSimulator.hpp"
-
-// =============================================================================
-// MapProperties — 描述一张地图 UI 控件的物理尺寸与游戏坐标范围
-// 用于在小地图上把 (gameX, gameY) 换算为屏幕像素坐标并点击。
-// =============================================================================
-struct MapProperties {
-    int uiPixelWidth;   // 小地图 UI 的像素宽度（从模板图获得）
-    int uiPixelHeight;  // 小地图 UI 的像素高度
-    int gameCoordMaxX;  // 地图游戏坐标 X 轴最大值
-    int gameCoordMaxY;  // 地图游戏坐标 Y 轴最大值
-};
+#include "domain/MapProperties.h"
 
 // =============================================================================
 // TencentBot — 跑商机器人主类

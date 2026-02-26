@@ -20,13 +20,19 @@ add_executable(untitled
         main.cpp
         dumper.cpp
         hv.asm
-        src/TencentBot.cpp
+        src/TencentBot.Core.cpp
+        src/TencentBot.Motion.cpp
+        src/TencentBot.Routes.cpp
+        src/TencentBot.TradeOps.cpp
+        src/TencentBot.TradingRoute.cpp
+        src/TencentBot.Captcha.cpp
         src/CheckpointStore.cpp
         src/DxgiWindowCapture.cpp
         src/CaptchaEngine.cpp
         src/GameMemory.cpp
         src/VisionEngine.cpp
         src/MemoryReader.cpp
+        src/config/BotSettings.cpp
         src/bt/BehaviorTree.cpp
         src/bt/StepDispatchTree.cpp
         src/domain/TradingRouteBehavior.cpp
@@ -70,8 +76,8 @@ add_custom_command(TARGET untitled POST_BUILD
         $<TARGET_FILE_DIR:untitled>
 )
 # 编译完成后拷贝资源目录到输出目录（源目录;目标子目录名）
-set(ASSET_SRCS assets/maps assets/npc assets/mapsui)
-set(ASSET_DSTS maps npcs mapsui)
+set(ASSET_SRCS assets/maps assets/npc assets/mapsui assets/config)
+set(ASSET_DSTS maps npcs mapsui config)
 list(LENGTH ASSET_SRCS N_ASSETS)
 math(EXPR N_ASSETS_LAST "${N_ASSETS} - 1")
 foreach(i RANGE ${N_ASSETS_LAST})

@@ -1,0 +1,40 @@
+#pragma once
+
+#include "../domain/MapProperties.h"
+
+#include <map>
+#include <string>
+
+namespace config {
+
+struct TimingSettings {
+    int key_action_delay_ms = 100;
+    int ui_update_delay_ms = 1000;
+    int map_change_delay_ms = 1500;
+    int ui_click_delay_ms = 1000;
+    int trade_confirm_delay_ms = 1000;
+};
+
+struct WindowOffsetSettings {
+    int x = -6;
+    int y = -57;
+};
+
+struct TradeThresholdSettings {
+    int paper_buy_price_max = 2600;
+    int oil_buy_price_max = 3600;
+    double paper_sell_profit_ratio = 1.50;
+    double oil_sell_profit_ratio = 1.50;
+};
+
+struct BotSettings {
+    TimingSettings timing;
+    WindowOffsetSettings window_offset;
+    TradeThresholdSettings trade_threshold;
+    std::map<std::string, MapProperties> map_properties;
+};
+
+// 读取全局配置（首次调用时懒加载；若配置文件缺失则使用内置默认值）。
+const BotSettings& GetBotSettings();
+
+} // namespace config
