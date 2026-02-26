@@ -33,7 +33,7 @@
 // role = 游戏逻辑坐标链（与 pit 同基址，不同二级偏移）
 // -----------------------------------------------------------------------------
 #define GAME_PIT_CHAIN_BASE_OFFSET   0x023d0210  // mhmain.dll + 此偏移 = 角色坑位一级指针
-#define GAME_PIT_POS_STRUCT_OFFSET   0xE8       // 一级指针 + 此偏移 = 坐标结构体首地址（X 在 +0，Y 在 +4）
+#define GAME_PIT_POS_STRUCT_OFFSET   0x118       // 一级指针 + 此偏移 = 坐标结构体首地址（X 在 +0，Y 在 +4）
 #define GAME_ROLE_CHAIN_BASE_OFFSET  0x023d0210  // 同一基址（pit 与 role 共享入口）
 #define GAME_ROLE_POS_STRUCT_OFFSET  0x208       // 游戏逻辑坐标结构体偏移
 
