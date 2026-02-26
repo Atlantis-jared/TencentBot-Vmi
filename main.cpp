@@ -11,6 +11,7 @@
 #include <thread>
 #include <string>
 #include <vector>
+#include <cstdint>
 #include <clocale>
 #include <windows.h>
 #include "src/CheckpointStore.h"
@@ -18,6 +19,7 @@
 #include "src/DxgiWindowCapture.h"
 #include "src/CaptchaEngine.h"
 #include "src/MemoryReader.h"
+#include "src/SharedDataStatus.h"
 #include "src/runtime/RuntimeController.h"
 
 TencentBot bot;
@@ -278,61 +280,35 @@ int main(int argc, char** argv) {
             return 2;
         }
 
-        std::shared_ptr<IProcessMemoryReader> debugReader;
-        if (memBackend == "vsock") {
-            debugReader = create_vsock_memory_reader(vsockCid, vsockPort, vsockTimeoutMs);
-        } else {
+        if (memBackend != "vsock") {
             std::cerr << "unsupported --mem-backend in print-cursor: " << memBackend << " (expected vsock)\n";
             return 2;
         }
-
-        std::uint64_t dllBase = 0;
+        std::shared_ptr<IProcessMemoryReader> debugReader =
+            create_vsock_memory_reader(vsockCid, vsockPort, vsockTimeoutMs);
         std::string err;
-        if (!debugReader->query_module_base_by_pid(debugPid, "mhmain.dll", &dllBase, &err)) {
-            std::cerr << "[Bot] print-cursor 查询 mhmain.dll 基址失败: " << err << "\n";
+        if (!debugReader->initialize_binding(debugPid, &err)) {
+            std::cerr << "[Bot] print-cursor INIT_BIND 失败: " << err << "\n";
             return 2;
         }
 
         std::cout << "[Bot] 光标坐标打印模式已启动（Ctrl+C 停止），interval="
                   << cursorIntervalMs << "ms"
                   << " pid=" << debugPid
-                  << " dllBase=0x" << std::hex << dllBase << std::dec << "\n";
+                  << " shared_addr=0x" << std::hex
+                  << reinterpret_cast<std::uintptr_t>(&g_shared_data)
+                  << std::dec << "\n";
         while (!g_stopRequested.load(std::memory_order_relaxed)) {
             POINT pt{};
             if (GetCursorPos(&pt)) {
-                // 一级指针：mhmain.dll + 链表基址偏移
-                const std::uint64_t vaFirstPtr = dllBase + GAME_PIT_CHAIN_BASE_OFFSET;
-                std::uint64_t firstPtr = 0;
-                std::uint32_t rawX = 0;
-                std::uint32_t rawY = 0;
-                std::string readErr;
-                if (!debugReader->read_virtual_by_pid(debugPid, vaFirstPtr, &firstPtr, sizeof(firstPtr), &readErr)) {
-                    std::cerr << "[Cursor] x=" << pt.x << " y=" << pt.y
-                              << " pid=" << debugPid
-                              << " dllBase=0x" << std::hex << dllBase
-                              << " va(first_ptr)=0x" << vaFirstPtr
-                              << std::dec
-                              << " err=" << readErr << "\n";
-                } else {
-                    // 二级地址：角色坐标结构体 (rawX/rawY)
-                    const std::uint64_t vaRawX = firstPtr + GAME_PIT_POS_STRUCT_OFFSET;
-                    const std::uint64_t vaRawY = vaRawX + sizeof(std::uint32_t);
-                    const bool okX = debugReader->read_virtual_by_pid(debugPid, vaRawX, &rawX, sizeof(rawX), &readErr);
-                    const bool okY = debugReader->read_virtual_by_pid(debugPid, vaRawY, &rawY, sizeof(rawY), &readErr);
-                    std::cout << "[Cursor] x=" << pt.x << " y=" << pt.y
-                              << " pid=" << debugPid
-                              << " dllBase=0x" << std::hex << dllBase
-                              << " va(first_ptr)=0x" << vaFirstPtr
-                              << " firstPtr=0x" << firstPtr
-                              << " va(rawX)=0x" << vaRawX
-                              << " va(rawY)=0x" << vaRawY
-                              << std::dec;
-                    if (okX && okY) {
-                        std::cout << " rawX=" << rawX << " rawY=" << rawY << "\n";
-                    } else {
-                        std::cout << " err=" << readErr << "\n";
-                    }
-                }
+                const SharedDataSnapshot snap = read_shared_data_snapshot();
+                std::cout << "[Cursor] x=" << pt.x << " y=" << pt.y
+                          << " sync=" << snap.sync_flag
+                          << " ts=" << snap.timestamp
+                          << " current_x=" << snap.current_x
+                          << " current_y=" << snap.current_y
+                          << " map_id=" << snap.map_id
+                          << "\n";
             } else {
                 std::cerr << "[Cursor] GetCursorPos failed\n";
             }

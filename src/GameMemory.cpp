@@ -3,6 +3,7 @@
 // =============================================================================
 #include "GameMemory.h"
 #include "BotLogger.h"
+#include "SharedDataStatus.h"
 
 // -----------------------------------------------------------------------------
 // kMapYBase — 各地图 Y 坐标基准值（rawY → gameY 的换算锚点）
@@ -35,7 +36,26 @@ const std::map<std::string, int> GameMemory::kMapYBase = {
 //               → rawY (uint32_t) at +4
 // -----------------------------------------------------------------------------
 RawCoord GameMemory::readPitPosRaw(uint32_t processIndex) const {
-    if (!reader_ || processIndex >= processIds.size() || processIndex >= dllBaseAddrs.size()) {
+    if (processIndex >= processIds.size()) {
+        BOT_ERR("GameMemory", "readPitPosRaw 参数越界或 reader 未初始化");
+        return {};
+    }
+    if (reader_ && reader_->uses_shared_data_feed()) {
+        const SharedDataSnapshot snap = read_shared_data_snapshot();
+        if (snap.sync_flag != 1) {
+            BOT_WARN("GameMemory", "SharedDataStatus 未就绪，sync_flag=" << snap.sync_flag);
+            return {};
+        }
+        if (snap.current_x < 0 || snap.current_y < 0) {
+            BOT_WARN("GameMemory", "SharedDataStatus 坐标异常: x=" << snap.current_x << " y=" << snap.current_y);
+            return {};
+        }
+        return RawCoord{
+            static_cast<std::uint32_t>(snap.current_x),
+            static_cast<std::uint32_t>(snap.current_y),
+        };
+    }
+    if (!reader_ || processIndex >= dllBaseAddrs.size()) {
         BOT_ERR("GameMemory", "readPitPosRaw 参数越界或 reader 未初始化");
         return {};
     }
@@ -88,7 +108,29 @@ RawCoord GameMemory::readPitPosRaw(uint32_t processIndex) const {
 // 调用方应先通过 VisionEngine::getCurrentMapName() 获取正确的地图名再传入。
 // -----------------------------------------------------------------------------
 GameCoord GameMemory::readRoleGameCoord(uint32_t processIndex, const std::string& currentMapName) const {
-    if (!reader_ || processIndex >= processIds.size() || processIndex >= dllBaseAddrs.size()) {
+    if (processIndex >= processIds.size()) {
+        BOT_ERR("GameMemory", "readRoleGameCoord 参数越界或 reader 未初始化");
+        return {};
+    }
+    if (reader_ && reader_->uses_shared_data_feed()) {
+        const SharedDataSnapshot snap = read_shared_data_snapshot();
+        if (snap.sync_flag != 1) {
+            BOT_WARN("GameMemory", "SharedDataStatus 未就绪，sync_flag=" << snap.sync_flag);
+            return {};
+        }
+
+        GameCoord result{};
+        result.x = (snap.current_x - 10) / 20;
+        auto yBaseIter = kMapYBase.find(currentMapName);
+        if (yBaseIter != kMapYBase.end()) {
+            result.y = (yBaseIter->second - snap.current_y) / 20;
+        } else {
+            BOT_WARN("GameMemory", "未知地图名「" << currentMapName << "」，无法换算 Y 坐标，返回 0");
+            result.y = 0;
+        }
+        return result;
+    }
+    if (!reader_ || processIndex >= dllBaseAddrs.size()) {
         BOT_ERR("GameMemory", "readRoleGameCoord 参数越界或 reader 未初始化");
         return {};
     }
@@ -152,6 +194,23 @@ bool GameMemory::initialize_module_bases(const std::string& module_name, std::st
         }
         return false;
     }
+
+    if (!processIds.empty()) {
+        std::string bindErr;
+        if (!reader_->initialize_binding(processIds.front(), &bindErr)) {
+            if (error) {
+                *error = "initialize_binding failed: " + bindErr;
+            }
+            return false;
+        }
+    }
+
+    if (reader_->uses_shared_data_feed()) {
+        dllBaseAddrs.assign(processIds.size(), 0);
+        BOT_LOG("GameMemory", "使用 SharedDataStatus 数据面，跳过模块基址查询");
+        return true;
+    }
+
     dllBaseAddrs.clear();
     dllBaseAddrs.reserve(processIds.size());
 

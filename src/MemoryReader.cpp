@@ -10,14 +10,19 @@
 #include <windows.h>
 #include <winsock2.h>
 #include <ws2tcpip.h>
+#include <tlhelp32.h>
 
 #include <algorithm>
 #include <array>
+#include <cctype>
 #include <cstring>
 #include <limits>
 #include <sstream>
+#include <string>
 
 #include "BotLogger.h"
+#include "GameMemory.h"
+#include "SharedDataStatus.h"
 #include "../hv.h"
 
 #pragma comment(lib, "Ws2_32.lib")
@@ -28,12 +33,7 @@ namespace {
 #define AF_VSOCK 40
 #endif
 
-constexpr std::uint32_t kOpRead = 1;
-constexpr std::uint32_t kOpDllBase = 2;
-constexpr std::uint32_t kOpVa2Pa = 3;
-constexpr std::uint32_t kOpReadPhys = 4;
-constexpr std::size_t kNameMax = 64;
-constexpr std::size_t kMsgMax = 160;
+constexpr std::size_t kHandshakeReplyMax = 8192;
 
 struct sockaddr_vm {
     ADDRESS_FAMILY svm_family;
@@ -42,28 +42,6 @@ struct sockaddr_vm {
     std::uint32_t svm_cid;
     std::uint8_t svm_zero[4];
 };
-
-struct RpcRequest {
-    std::uint32_t op;
-    std::uint32_t pid;
-    std::uint64_t addr;
-    std::uint32_t len;
-    std::uint32_t reserved;
-    char process_name[kNameMax];
-    char module_name[kNameMax];
-};
-
-struct RpcResponse {
-    std::int32_t status;
-    std::uint32_t op;
-    std::uint32_t data_len;
-    std::uint32_t reserved;
-    std::uint64_t value_u64;
-    char message[kMsgMax];
-};
-
-static_assert(sizeof(RpcRequest) == 152, "RpcRequest layout mismatch");
-static_assert(sizeof(RpcResponse) == 184, "RpcResponse layout mismatch");
 
 std::string win_error_message(DWORD error_code) {
     LPSTR msg_buf = nullptr;
@@ -90,14 +68,6 @@ std::string win_error_message(DWORD error_code) {
     return msg;
 }
 
-std::string fixed_to_string(const char* src, std::size_t len) {
-    std::size_t n = 0;
-    while (n < len && src[n] != '\0') {
-        ++n;
-    }
-    return std::string(src, n);
-}
-
 bool send_all(SOCKET sock, const std::uint8_t* data, std::size_t len, std::string* error) {
     std::size_t sent = 0;
     while (sent < len) {
@@ -119,27 +89,6 @@ bool send_all(SOCKET sock, const std::uint8_t* data, std::size_t len, std::strin
     return true;
 }
 
-bool recv_all(SOCKET sock, std::uint8_t* data, std::size_t len, std::string* error) {
-    std::size_t done = 0;
-    while (done < len) {
-        const int rc = recv(sock, reinterpret_cast<char*>(data + done), static_cast<int>(len - done), 0);
-        if (rc == SOCKET_ERROR) {
-            if (error) {
-                *error = "recv failed: " + win_error_message(static_cast<DWORD>(WSAGetLastError()));
-            }
-            return false;
-        }
-        if (rc == 0) {
-            if (error) {
-                *error = "peer closed connection";
-            }
-            return false;
-        }
-        done += static_cast<std::size_t>(rc);
-    }
-    return true;
-}
-
 class WsInitGuard {
 public:
     WsInitGuard() {
@@ -153,6 +102,7 @@ public:
         }
     }
     bool ok() const { return ok_; }
+
 private:
     bool ok_ = false;
 };
@@ -160,6 +110,56 @@ private:
 WsInitGuard& global_wsa() {
     static WsInitGuard guard;
     return guard;
+}
+
+bool query_module_base_local(std::uint64_t pid, const char* module_name, std::uint64_t* out_base, std::string* error) {
+    if (pid == 0 || module_name == nullptr || out_base == nullptr) {
+        if (error) {
+            *error = "invalid query_module_base_local args";
+        }
+        return false;
+    }
+
+    HANDLE snapshot = CreateToolhelp32Snapshot(
+        TH32CS_SNAPMODULE | TH32CS_SNAPMODULE32,
+        static_cast<DWORD>(pid)
+    );
+    if (snapshot == INVALID_HANDLE_VALUE) {
+        if (error) {
+            *error = "CreateToolhelp32Snapshot failed";
+        }
+        return false;
+    }
+
+    MODULEENTRY32 me{};
+    me.dwSize = sizeof(me);
+    bool found = false;
+    if (Module32First(snapshot, &me)) {
+        do {
+            std::string name(me.szModule ? me.szModule : "");
+            for (char& ch : name) {
+                ch = static_cast<char>(std::tolower(static_cast<unsigned char>(ch)));
+            }
+            std::string target(module_name);
+            for (char& ch : target) {
+                ch = static_cast<char>(std::tolower(static_cast<unsigned char>(ch)));
+            }
+            if (name == target) {
+                *out_base = reinterpret_cast<std::uint64_t>(me.modBaseAddr);
+                found = true;
+                break;
+            }
+        } while (Module32Next(snapshot, &me));
+    }
+    CloseHandle(snapshot);
+
+    if (!found) {
+        if (error) {
+            *error = std::string("module not found: ") + module_name;
+        }
+        return false;
+    }
+    return true;
 }
 
 }  // namespace
@@ -236,22 +236,20 @@ bool HvMemoryReader::query_module_base_by_pid(
 VsockMemoryReader::VsockMemoryReader(std::uint32_t cid, std::uint32_t port, std::uint32_t timeout_ms)
     : cid_(cid), port_(port), timeout_ms_(timeout_ms) {}
 
-VsockMemoryReader::~VsockMemoryReader() {
-    close_socket();
-}
+VsockMemoryReader::~VsockMemoryReader() = default;
 
-bool VsockMemoryReader::ensure_connected(std::string* error) {
+bool VsockMemoryReader::connect_vsock(std::uintptr_t* out_sock, std::string* error) {
+    if (out_sock == nullptr) {
+        if (error) {
+            *error = "out_sock is null";
+        }
+        return false;
+    }
     if (!global_wsa().ok()) {
         if (error) {
             *error = "WSAStartup failed";
         }
         return false;
-    }
-
-    const SOCKET invalid = INVALID_SOCKET;
-    SOCKET current = static_cast<SOCKET>(sock_);
-    if (current != invalid) {
-        return true;
     }
 
     SOCKET sock = socket(AF_VSOCK, SOCK_STREAM, 0);
@@ -286,69 +284,142 @@ bool VsockMemoryReader::ensure_connected(std::string* error) {
         return false;
     }
 
-    sock_ = static_cast<std::uintptr_t>(sock);
-    BOT_LOG("MemoryReader", "vsock connected cid=" << cid_ << " port=" << port_);
+    *out_sock = static_cast<std::uintptr_t>(sock);
     return true;
 }
 
-void VsockMemoryReader::close_socket() {
-    const SOCKET invalid = INVALID_SOCKET;
-    SOCKET s = static_cast<SOCKET>(sock_);
-    if (s != invalid) {
-        closesocket(s);
-        sock_ = static_cast<std::uintptr_t>(invalid);
+void VsockMemoryReader::close_socket(std::uintptr_t sock) {
+    const SOCKET raw = static_cast<SOCKET>(sock);
+    if (raw != INVALID_SOCKET) {
+        closesocket(raw);
     }
 }
 
-bool VsockMemoryReader::request_roundtrip(
-    const void* req,
-    std::size_t req_size,
-    void* out_resp,
-    std::size_t resp_size,
-    std::uint8_t* out_data,
-    std::size_t out_data_size,
-    std::size_t* out_data_read,
-    std::string* error
-) {
-    if (req == nullptr || out_resp == nullptr) {
+bool VsockMemoryReader::send_text(std::uintptr_t sock, const std::string& text, std::string* error) {
+    return send_all(static_cast<SOCKET>(sock), reinterpret_cast<const std::uint8_t*>(text.data()), text.size(), error);
+}
+
+bool VsockMemoryReader::recv_text(std::uintptr_t sock, std::string* out_text, std::string* error) {
+    if (out_text == nullptr) {
         if (error) {
-            *error = "invalid roundtrip pointers";
+            *error = "out_text is null";
         }
         return false;
     }
-    if (!ensure_connected(error)) {
+
+    out_text->clear();
+    std::array<char, 1024> chunk{};
+    while (out_text->size() < kHandshakeReplyMax) {
+        const int rc = recv(static_cast<SOCKET>(sock), chunk.data(), static_cast<int>(chunk.size()), 0);
+        if (rc == SOCKET_ERROR) {
+            if (error) {
+                *error = "recv failed: " + win_error_message(static_cast<DWORD>(WSAGetLastError()));
+            }
+            return false;
+        }
+        if (rc == 0) {
+            break;
+        }
+        out_text->append(chunk.data(), static_cast<std::size_t>(rc));
+        if (out_text->find('\n') != std::string::npos) {
+            break;
+        }
+    }
+
+    if (out_text->empty()) {
+        if (error) {
+            *error = "empty INIT_BIND reply";
+        }
+        return false;
+    }
+    return true;
+}
+
+bool VsockMemoryReader::init_bind_once(std::uint64_t target_pid, std::string* error) {
+    if (target_pid == 0) {
+        if (error) {
+            *error = "target_pid is 0";
+        }
         return false;
     }
 
-    SOCKET sock = static_cast<SOCKET>(sock_);
-    if (!send_all(sock, reinterpret_cast<const std::uint8_t*>(req), req_size, error) ||
-        !recv_all(sock, reinterpret_cast<std::uint8_t*>(out_resp), resp_size, error)) {
-        close_socket();
+    std::uintptr_t sock = static_cast<std::uintptr_t>(~std::uintptr_t{0});
+    if (!connect_vsock(&sock, error)) {
         return false;
     }
 
-    if (out_data_read) {
-        *out_data_read = 0;
+    std::uint64_t target_chain_root_va = 0;
+    {
+        std::uint64_t module_base = 0;
+        std::string modErr;
+        if (query_module_base_local(target_pid, "mhmain.dll", &module_base, &modErr)) {
+            target_chain_root_va = module_base + GAME_PIT_CHAIN_BASE_OFFSET;
+        } else {
+            BOT_WARN("MemoryReader", "query_module_base_local 失败，Host 侧可能需自行解析模块: " << modErr);
+        }
     }
 
-    const RpcResponse* resp = reinterpret_cast<const RpcResponse*>(out_resp);
-    const std::size_t data_len = static_cast<std::size_t>(resp->data_len);
-    if (data_len == 0) {
+    std::ostringstream req;
+    req << "{\"cmd\":\"INIT_BIND\",\"data\":{"
+        << "\"bot_pid\":" << static_cast<std::uint64_t>(GetCurrentProcessId()) << ","
+        << "\"bot_receive_addr\":\"0x" << std::hex
+        << reinterpret_cast<std::uintptr_t>(&g_shared_data)
+        << std::dec << "\","
+        << "\"target_game_pid\":" << target_pid << ","
+        << "\"target_game_name\":\"mhmain.exe\","
+        << "\"target_base_addr\":\"mhmain.dll+0x" << std::hex
+        << GAME_PIT_CHAIN_BASE_OFFSET
+        << std::dec << "\","
+        << "\"target_chain_root_va\":\"0x" << std::hex
+        << target_chain_root_va
+        << std::dec << "\","
+        << "\"target_offsets\":["
+        << GAME_PIT_POS_STRUCT_OFFSET << ","
+        << (GAME_PIT_POS_STRUCT_OFFSET + 4) << ","
+        // 第 3 个偏移位预留 map_id；若目标结构无该字段，Host 可忽略或写 0。
+        << (GAME_PIT_POS_STRUCT_OFFSET + 8)
+        << "]"
+        << "}}\n";
+
+    std::string reply;
+    const bool ok = send_text(sock, req.str(), error) && recv_text(sock, &reply, error);
+    close_socket(sock);
+    if (!ok) {
+        return false;
+    }
+
+    const bool accepted =
+        reply.find("HOST_READY_DATA_LINK_ESTABLISHED") != std::string::npos ||
+        reply.find("\"status\":\"success\"") != std::string::npos ||
+        reply.find("\"status\": \"success\"") != std::string::npos;
+
+    if (!accepted) {
+        if (error) {
+            *error = "INIT_BIND rejected: " + reply;
+        }
+        return false;
+    }
+
+    BOT_LOG("MemoryReader", "INIT_BIND 完成 target_pid=" << target_pid
+            << " shared_addr=0x" << std::hex << reinterpret_cast<std::uintptr_t>(&g_shared_data)
+            << std::dec);
+    return true;
+}
+
+bool VsockMemoryReader::initialize_binding(std::uint64_t target_pid, std::string* error) {
+    std::lock_guard<std::mutex> lk(bind_mu_);
+    if (bind_done_) {
+        if (error) {
+            error->clear();
+        }
         return true;
     }
-    if (out_data == nullptr || out_data_size < data_len) {
-        if (error) {
-            *error = "response data buffer is too small";
-        }
-        close_socket();
+    if (!init_bind_once(target_pid, error)) {
         return false;
     }
-    if (!recv_all(sock, out_data, data_len, error)) {
-        close_socket();
-        return false;
-    }
-    if (out_data_read) {
-        *out_data_read = data_len;
+    bind_done_ = true;
+    if (error) {
+        error->clear();
     }
     return true;
 }
@@ -360,61 +431,14 @@ bool VsockMemoryReader::read_virtual_by_pid(
     std::size_t size,
     std::string* error
 ) {
-    if (pid == 0 || out == nullptr || size == 0 || size > std::numeric_limits<std::uint32_t>::max()) {
-        if (error) {
-            *error = "invalid read_virtual_by_pid arguments";
-        }
-        return false;
+    (void)pid;
+    (void)va;
+    (void)out;
+    (void)size;
+    if (error) {
+        *error = "vsock direct read is disabled; use SharedDataStatus feed";
     }
-
-    RpcRequest va2pa_req{};
-    va2pa_req.op = kOpVa2Pa;
-    va2pa_req.pid = static_cast<std::uint32_t>(pid);
-    va2pa_req.addr = va;
-    va2pa_req.len = static_cast<std::uint32_t>(size);
-
-    RpcResponse va2pa_resp{};
-    if (!request_roundtrip(&va2pa_req, sizeof(va2pa_req), &va2pa_resp, sizeof(va2pa_resp), nullptr, 0, nullptr, error)) {
-        return false;
-    }
-    if (va2pa_resp.status != 0) {
-        if (error) {
-            *error = "va2pa failed: " + fixed_to_string(va2pa_resp.message, sizeof(va2pa_resp.message));
-        }
-        return false;
-    }
-
-    RpcRequest read_req{};
-    read_req.op = kOpReadPhys;
-    read_req.addr = va2pa_resp.value_u64;
-    read_req.len = static_cast<std::uint32_t>(size);
-
-    RpcResponse read_resp{};
-    std::size_t data_read = 0;
-    if (!request_roundtrip(
-            &read_req,
-            sizeof(read_req),
-            &read_resp,
-            sizeof(read_resp),
-            reinterpret_cast<std::uint8_t*>(out),
-            size,
-            &data_read,
-            error)) {
-        return false;
-    }
-    if (read_resp.status != 0) {
-        if (error) {
-            *error = "read-phys failed: " + fixed_to_string(read_resp.message, sizeof(read_resp.message));
-        }
-        return false;
-    }
-    if (data_read != size) {
-        if (error) {
-            *error = "read-phys size mismatch";
-        }
-        return false;
-    }
-    return true;
+    return false;
 }
 
 bool VsockMemoryReader::query_module_base_by_pid(
@@ -423,30 +447,17 @@ bool VsockMemoryReader::query_module_base_by_pid(
     std::uint64_t* out_base,
     std::string* error
 ) {
-    if (pid == 0 || out_base == nullptr || module_name.empty()) {
+    (void)module_name;
+    if (out_base == nullptr) {
         if (error) {
-            *error = "invalid query_module_base_by_pid arguments";
+            *error = "out_base is null";
         }
         return false;
     }
-
-    RpcRequest req{};
-    req.op = kOpDllBase;
-    req.pid = static_cast<std::uint32_t>(pid);
-    const std::size_t n = std::min(module_name.size(), kNameMax - 1);
-    std::memcpy(req.module_name, module_name.data(), n);
-
-    RpcResponse resp{};
-    if (!request_roundtrip(&req, sizeof(req), &resp, sizeof(resp), nullptr, 0, nullptr, error)) {
+    if (!initialize_binding(pid, error)) {
         return false;
     }
-    if (resp.status != 0) {
-        if (error) {
-            *error = "dllbase failed: " + fixed_to_string(resp.message, sizeof(resp.message));
-        }
-        return false;
-    }
-    *out_base = resp.value_u64;
+    *out_base = 0;
     return true;
 }
 
@@ -461,4 +472,3 @@ std::shared_ptr<IProcessMemoryReader> create_vsock_memory_reader(
 ) {
     return std::make_shared<VsockMemoryReader>(cid, port, timeout_ms);
 }
-

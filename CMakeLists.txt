@@ -32,6 +32,7 @@ add_executable(untitled
         src/GameMemory.cpp
         src/VisionEngine.cpp
         src/MemoryReader.cpp
+        src/SharedDataStatus.cpp
         src/config/BotSettings.cpp
         src/bt/BehaviorTree.cpp
         src/bt/StepDispatchTree.cpp

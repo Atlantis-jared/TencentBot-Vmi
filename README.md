@@ -218,8 +218,33 @@ cmake --build build --config Release
 
 1. Hypervisor 驱动已加载（`hv::is_hv_running()` 返回 true）
 2. 游戏进程 `mhmain.exe` 和 `mhtab.exe` 正在运行
-3. AI 识别服务运行在 `http://127.0.0.1:8000`
-4. 屏幕分辨率 2560×1440（逻辑分辨率）
+3. Host 侧内存后端已启动（推荐 C++ 后端，监听 `4050`）
+4. AI 识别服务运行在 `http://127.0.0.1:8000`
+5. 屏幕分辨率 2560×1440（逻辑分辨率）
+
+### 启动内存后端（推荐）
+
+```bash
+# Host: C++ 后端（推荐）
+cd /root/workspace/TencentBot-vmi-mem-backend-cpp
+cmake --preset linux-release
+cmake --build --preset build-release
+./build/release/tencentbot_mem_backend --transport vsock --listen-cid 2 --listen-port 4050 --backend mock --verbose
+```
+
+生产环境建议把 `--backend mock` 替换为 `--backend command --tool <你的物理读写工具>`。
+例如：
+
+```bash
+./build/release/tencentbot_mem_backend --transport vsock --listen-cid 2 --listen-port 4050 --backend command --tool /root/workspace/TencentBot-vmi-mem-backend/run_memflow_tool.sh
+```
+
+### 启动内存后端（备选：Python）
+
+```bash
+cd /root/workspace/TencentBot-vmi-mem-backend
+python3 backend.py --transport vsock --listen-cid 2 --listen-port 4050 --backend memflow --memflow-os qemu --memflow-os-args vm101
+```
 
 ### 基本用法
 
@@ -242,7 +267,7 @@ cmake --build build --config Release
 # 指定 checkpoint 文件路径
 .\untitled.exe --checkpoint mybot.json
 
-# 使用 guestread vsock 作为内存后端（替代 HV 读内存）
+# 使用 vsock INIT_BIND（连接 Host 独立内存后端）
 .\untitled.exe --mem-backend vsock --cid 2 --port 4050 --vsock-timeout-ms 5000
 ```
 
