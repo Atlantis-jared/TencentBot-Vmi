@@ -89,6 +89,7 @@
 - 抽离 `RuntimeController` 为独立类（`src/runtime/`）[done]
 - 抽离行为树节点到独立模块（`src/bt/`）[done]
 - 跑商主循环改为显式 step 分发行为树（非单一 step_action）[done]
+- step 分发分支构建器抽离为 `src/bt/StepDispatchTree.*` [done]
 - 命令协议升级为 JSON（带 request_id）[in progress: text protocol already supports request_id]
 - 增加集成测试（命令状态转换、checkpoint 恢复、异常恢复）
 - 增加故障注入测试（初始化失败、网络抖动、识别失败）

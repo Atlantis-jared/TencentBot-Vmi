@@ -28,6 +28,7 @@ add_executable(untitled
         src/VisionEngine.cpp
         src/MemoryReader.cpp
         src/bt/BehaviorTree.cpp
+        src/bt/StepDispatchTree.cpp
         src/runtime/RuntimeController.cpp
 )
 

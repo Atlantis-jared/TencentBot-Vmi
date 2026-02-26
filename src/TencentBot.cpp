@@ -3,6 +3,7 @@
 // =============================================================================
 #include "TencentBot.h"
 #include "bt/BehaviorTree.h"
+#include "bt/StepDispatchTree.h"
 #include "BotLogger.h"
 #include "CheckpointStore.h"
 
@@ -1488,41 +1489,28 @@ void TencentBot::runTradingRoute() {
     goalChildren.emplace_back(std::make_unique<bt::Condition>("goal_reached?", btGoalCondition, btObserver));
     goalChildren.emplace_back(std::make_unique<bt::Action>("return_and_submit", btGoalAction, btObserver));
 
-    // 构建 step 分发分支：
-    // 每个 step_i 均为 Sequence(判断 next_op, 执行 step)。
-    std::vector<std::unique_ptr<bt::Node>> dispatchChildren;
+    // 构建 step 分发分支（由 bt::BuildStepDispatchTree 统一生成）：
+    // 每个 step_i 节点为 Sequence(is_step_i, run_step_i)。
+    std::vector<bt::StepDispatchItem> dispatchItems;
+    dispatchItems.reserve(steps.size());
     for (int i = 0; i < static_cast<int>(steps.size()); ++i) {
-        std::vector<std::unique_ptr<bt::Node>> gatedStepChildren;
-        gatedStepChildren.emplace_back(std::make_unique<bt::Condition>(
-            "is_step_" + std::to_string(i),
-            [&, i]() { return ck.next_op == i; },
-            btObserver
-        ));
-        gatedStepChildren.emplace_back(std::make_unique<bt::Action>(
-            "run_" + std::string(steps[i].name),
-            [&, i]() { return btRunStep(i); },
-            btObserver
-        ));
-        dispatchChildren.emplace_back(std::make_unique<bt::Sequence>(
-            "dispatch_step_" + std::to_string(i),
-            std::move(gatedStepChildren),
-            btObserver
-        ));
+        dispatchItems.push_back(bt::StepDispatchItem{
+            std::string(steps[i].name),
+            [&, i]() { return btRunStep(i); }
+        });
     }
-    dispatchChildren.emplace_back(std::make_unique<bt::Action>(
-        "cycle_restart_if_needed",
+    std::unique_ptr<bt::Node> stepDispatchTree = bt::BuildStepDispatchTree(
+        "step_dispatch_branch",
+        std::move(dispatchItems),
+        [&]() { return ck.next_op; },
         btCycleRestartIfNeeded,
         btObserver
-    ));
+    );
 
     // 构建根节点：优先走 goal_branch，否则走 step_dispatch_branch。
     std::vector<std::unique_ptr<bt::Node>> rootChildren;
     rootChildren.emplace_back(std::make_unique<bt::Sequence>("goal_branch", std::move(goalChildren), btObserver));
-    rootChildren.emplace_back(std::make_unique<bt::Selector>(
-        "step_dispatch_branch",
-        std::move(dispatchChildren),
-        btObserver
-    ));
+    rootChildren.emplace_back(std::move(stepDispatchTree));
     std::unique_ptr<bt::Node> root = std::make_unique<bt::Selector>("route_root", std::move(rootChildren), btObserver);
 
     try {
