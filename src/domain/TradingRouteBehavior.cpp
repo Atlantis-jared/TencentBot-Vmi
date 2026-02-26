@@ -50,56 +50,89 @@ public:
             }
         };
 
-        std::vector<std::unique_ptr<bt::Node>> goal_children;
-        goal_children.emplace_back(std::make_unique<bt::Condition>(
-            "goal_reached?",
-            std::move(ctx.is_goal_reached),
-            bt_observer
-        ));
-        goal_children.emplace_back(std::make_unique<bt::Action>(
-            "return_and_submit",
-            [goal_action = std::move(ctx.run_goal_action)]() {
-                if (!goal_action) {
-                    return bt::Status::Failure;
-                }
-                return to_bt_status(goal_action());
-            },
-            bt_observer
-        ));
-
-        std::vector<bt::StepDispatchItem> dispatch_items;
-        dispatch_items.reserve(ctx.steps.size());
-        for (auto& step : ctx.steps) {
-            dispatch_items.push_back(bt::StepDispatchItem{
-                std::move(step.name),
-                [run = std::move(step.run)]() {
-                    if (!run) {
+        // --- goal 分支 ---
+        std::unique_ptr<bt::Node> goal_branch_node;
+        if (ctx.goal_subtree) {
+            // 子树模式：goal 判断和动作都已在子树内部构建好。
+            goal_branch_node = std::move(ctx.goal_subtree);
+        } else {
+            // 函数模式：用 Condition + Action 构建 goal 分支。
+            std::vector<std::unique_ptr<bt::Node>> goal_children;
+            goal_children.emplace_back(std::make_unique<bt::Condition>(
+                "goal_reached?",
+                std::move(ctx.is_goal_reached),
+                bt_observer
+            ));
+            goal_children.emplace_back(std::make_unique<bt::Action>(
+                "return_and_submit",
+                [goal_action = std::move(ctx.run_goal_action)]() {
+                    if (!goal_action) {
                         return bt::Status::Failure;
                     }
-                    return to_bt_status(run());
-                }
-            });
+                    return to_bt_status(goal_action());
+                },
+                bt_observer
+            ));
+            goal_branch_node = std::make_unique<bt::Sequence>(
+                "goal_branch",
+                std::move(goal_children),
+                bt_observer
+            );
         }
 
-        std::unique_ptr<bt::Node> step_dispatch = bt::BuildStepDispatchTree(
-            "step_dispatch_branch",
-            std::move(dispatch_items),
-            std::move(ctx.current_step_index),
-            [cycle_restart = std::move(ctx.cycle_restart_if_needed)]() {
-                if (!cycle_restart) {
-                    return bt::Status::Failure;
-                }
-                return to_bt_status(cycle_restart());
-            },
-            bt_observer
-        );
+        // --- 步骤分发分支 ---
+        auto cycle_restart_bt = [cycle_restart = std::move(ctx.cycle_restart_if_needed)]() {
+            if (!cycle_restart) {
+                return bt::Status::Failure;
+            }
+            return to_bt_status(cycle_restart());
+        };
 
+        std::unique_ptr<bt::Node> step_dispatch;
+        if (!ctx.step_subtrees.empty()) {
+            // 子树模式：将 StepSubtreeNode 转换为 bt::StepTreeItem。
+            std::vector<bt::StepTreeItem> tree_items;
+            tree_items.reserve(ctx.step_subtrees.size());
+            for (auto& sn : ctx.step_subtrees) {
+                tree_items.push_back(bt::StepTreeItem{
+                    std::move(sn.name),
+                    std::move(sn.subtree)
+                });
+            }
+            step_dispatch = bt::BuildStepDispatchTree(
+                "step_dispatch_branch",
+                std::move(tree_items),
+                std::move(ctx.current_step_index),
+                std::move(cycle_restart_bt),
+                bt_observer
+            );
+        } else {
+            // 函数模式（向后兼容）：将 TradingStepNode 包装为 bt::StepDispatchItem。
+            std::vector<bt::StepDispatchItem> dispatch_items;
+            dispatch_items.reserve(ctx.steps.size());
+            for (auto& step : ctx.steps) {
+                dispatch_items.push_back(bt::StepDispatchItem{
+                    std::move(step.name),
+                    [run = std::move(step.run)]() {
+                        if (!run) {
+                            return bt::Status::Failure;
+                        }
+                        return to_bt_status(run());
+                    }
+                });
+            }
+            step_dispatch = bt::BuildStepDispatchTree(
+                "step_dispatch_branch",
+                std::move(dispatch_items),
+                std::move(ctx.current_step_index),
+                std::move(cycle_restart_bt),
+                bt_observer
+            );
+        }
+
+        // --- 根节点 ---
         std::vector<std::unique_ptr<bt::Node>> root_children;
-        root_children.emplace_back(std::make_unique<bt::Sequence>(
-            "goal_branch",
-            std::move(goal_children),
-            bt_observer
-        ));
+        root_children.emplace_back(std::move(goal_branch_node));
         root_children.emplace_back(std::move(step_dispatch));
         root_ = std::make_unique<bt::Selector>("route_root", std::move(root_children), bt_observer);
     }

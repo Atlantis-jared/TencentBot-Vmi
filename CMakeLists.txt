@@ -35,7 +35,10 @@ add_executable(untitled
         src/config/BotSettings.cpp
         src/bt/BehaviorTree.cpp
         src/bt/StepDispatchTree.cpp
+        src/bt/RetryDecorator.cpp
+        src/bt/WaitAction.cpp
         src/domain/TradingRouteBehavior.cpp
+        src/domain/TradingStepTrees.cpp
         src/runtime/RuntimeController.cpp
 )
 
