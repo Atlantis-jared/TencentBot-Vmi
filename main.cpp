@@ -1,15 +1,28 @@
+#ifndef NOMINMAX
+#define NOMINMAX
+#endif
+#ifndef WIN32_LEAN_AND_MEAN
+#define WIN32_LEAN_AND_MEAN
+#endif
+
 #include <iostream>
 #include <atomic>
 #include <thread>
 #include <string>
 #include <vector>
+#include <algorithm>
+#include <cctype>
 #include <clocale>
+#include <winsock2.h>
+#include <ws2tcpip.h>
 #include <windows.h>
 #include "src/CheckpointStore.h"
 #include "src/TencentBot.h"
 #include "src/DxgiWindowCapture.h"
 #include "src/CaptchaEngine.h"
 #include "src/MemoryReader.h"
+
+#pragma comment(lib, "Ws2_32.lib")
 
 TencentBot bot;
 static std::atomic_bool g_stopRequested{false};
@@ -29,12 +42,6 @@ static BOOL WINAPI ConsoleCtrlHandler(DWORD ctrlType) {
 }
 
 namespace {
-    constexpr unsigned kScreenLogicalW = 2560;
-    constexpr unsigned kScreenLogicalH = 1440;
-    constexpr unsigned kMouseMax = 65535;
-}
-
-namespace {
     void printCheckpointHelp() {
         std::cout <<
 R"(Checkpoint tools:
@@ -47,6 +54,8 @@ R"(Checkpoint tools:
   --print-cursor              持续打印当前鼠标坐标（调试模式）
   --cursor-interval-ms <n>    鼠标坐标打印间隔毫秒（默认 100）
   --pid <n>                   print-cursor 模式下用于读内存链的目标 PID
+  --remote-control            开启远程控制模式（通过 TCP 指令启停）
+  --remote-port <n>           远程控制监听端口（默认 19090）
 
 next_op 对应关系（v3）:
   0: leave_gang_to_difu        出帮派 -> 长安 -> 大唐国境 -> 地府
@@ -81,6 +90,44 @@ next_op 对应关系（v3）:
             return false;
         }
     }
+
+    std::string trim(const std::string& s) {
+        std::size_t begin = 0;
+        while (begin < s.size() && std::isspace(static_cast<unsigned char>(s[begin])) != 0) {
+            ++begin;
+        }
+        std::size_t end = s.size();
+        while (end > begin && std::isspace(static_cast<unsigned char>(s[end - 1])) != 0) {
+            --end;
+        }
+        return s.substr(begin, end - begin);
+    }
+
+    std::string upper_ascii(std::string s) {
+        std::transform(s.begin(), s.end(), s.begin(), [](unsigned char c) {
+            return static_cast<char>(std::toupper(c));
+        });
+        return s;
+    }
+
+    class WsaInitGuard {
+    public:
+        WsaInitGuard() {
+            WSADATA wsa{};
+            ok_ = (WSAStartup(MAKEWORD(2, 2), &wsa) == 0);
+        }
+
+        ~WsaInitGuard() {
+            if (ok_) {
+                WSACleanup();
+            }
+        }
+
+        bool ok() const { return ok_; }
+
+    private:
+        bool ok_ = false;
+    };
 } // namespace
 
 int main(int argc, char** argv) {
@@ -102,6 +149,7 @@ int main(int argc, char** argv) {
     uint32_t vsockPort = 4050;
     uint32_t vsockTimeoutMs = 5000;
     uint32_t cursorIntervalMs = 100;
+    uint32_t remotePort = 19090;
     uint64_t debugPid = 0;
     TradingCheckpoint forced{};
     bool forceNextOp = false, forceCycle = false, forceTarget = false;
@@ -147,6 +195,16 @@ int main(int argc, char** argv) {
         }
         if (a == "--pid" && i + 1 < argc) {
             if (!parseU64(args[++i], debugPid)) { std::cerr << "bad --pid\n"; return 2; }
+            continue;
+        }
+        if (a == "--remote-control") {
+            continue;
+        }
+        if (a == "--remote-port" && i + 1 < argc) {
+            if (!parseU32(args[++i], remotePort) || remotePort == 0 || remotePort > 65535) {
+                std::cerr << "bad --remote-port\n";
+                return 2;
+            }
             continue;
         }
         if (a == "--mem-backend" && i + 1 < argc) {
@@ -307,27 +365,107 @@ int main(int argc, char** argv) {
     try {
         bot.init();
         bot.configureRunControl(&g_stopRequested, "bot_checkpoint.json");
-        std::cout << "[Bot] 初始化完成（按 Enter 或 Ctrl+C 请求停止，可续跑）\n";
 
-        // 监听控制台 Enter（不阻塞主线程）
-        std::thread([] {
-            std::string line;
-            std::getline(std::cin, line);
-            g_stopRequested.store(true, std::memory_order_relaxed);
-        }).detach();
+        WsaInitGuard wsa;
+        if (!wsa.ok()) {
+            std::cerr << "[Bot] 远程控制启动失败: WSAStartup 失败\n";
+            return 2;
+        }
 
-        IbSendMouseMove(static_cast<int>(kMouseMax * 1280 / kScreenLogicalW),
-                        static_cast<int>(kMouseMax * 40 / kScreenLogicalH),
-                        Send::MoveMode::Absolute);
-        Sleep(100);
-        IbSendMouseClick(Send::MouseButton::Left);
-        Sleep(100);
-        IbSendMouseMove(static_cast<int>(kMouseMax * 1280 / kScreenLogicalW),
-                        static_cast<int>(kMouseMax * 200 / kScreenLogicalH),
-                        Send::MoveMode::Absolute);
-        Sleep(100);
+        SOCKET listenSock = socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
+        if (listenSock == INVALID_SOCKET) {
+            std::cerr << "[Bot] 远程控制启动失败: socket 创建失败\n";
+            return 2;
+        }
 
-        bot.runTradingRoute();
+        auto closeSock = [](SOCKET& s) {
+            if (s != INVALID_SOCKET) {
+                closesocket(s);
+                s = INVALID_SOCKET;
+            }
+        };
+
+        sockaddr_in addr{};
+        addr.sin_family = AF_INET;
+        addr.sin_port = htons(static_cast<u_short>(remotePort));
+        addr.sin_addr.s_addr = htonl(INADDR_ANY);
+        if (bind(listenSock, reinterpret_cast<sockaddr*>(&addr), sizeof(addr)) == SOCKET_ERROR) {
+            std::cerr << "[Bot] 远程控制启动失败: bind 端口 " << remotePort << " 失败\n";
+            closeSock(listenSock);
+            return 2;
+        }
+        if (listen(listenSock, 8) == SOCKET_ERROR) {
+            std::cerr << "[Bot] 远程控制启动失败: listen 失败\n";
+            closeSock(listenSock);
+            return 2;
+        }
+
+        std::atomic_bool remoteQuit{false};
+        std::atomic_bool startRequested{false};
+        std::atomic<int> runState{0}; // 0=idle,1=running
+
+        std::thread worker([&] {
+            while (!remoteQuit.load(std::memory_order_relaxed)) {
+                if (startRequested.exchange(false, std::memory_order_acq_rel)) {
+                    if (runState.load(std::memory_order_relaxed) == 0) {
+                        runState.store(1, std::memory_order_relaxed);
+                        g_stopRequested.store(false, std::memory_order_relaxed);
+                        try {
+                            bot.runTradingRoute();
+                        } catch (const std::exception& e) {
+                            std::cerr << "[Bot] runTradingRoute 异常: " << e.what() << "\n";
+                        }
+                        runState.store(0, std::memory_order_relaxed);
+                    }
+                }
+                Sleep(20);
+            }
+        });
+
+        std::cout << "[Bot] 初始化完成，远程控制已开启，监听 0.0.0.0:" << remotePort << "\n";
+        std::cout << "[Bot] 指令: START / STOP / STATUS / QUIT\n";
+        while (!remoteQuit.load(std::memory_order_relaxed)) {
+            SOCKET clientSock = accept(listenSock, nullptr, nullptr);
+            if (clientSock == INVALID_SOCKET) {
+                break;
+            }
+
+            char buf[256] = {};
+            const int rc = recv(clientSock, buf, static_cast<int>(sizeof(buf) - 1), 0);
+            std::string reply = "ERR empty command\n";
+            if (rc > 0) {
+                std::string cmd(buf, buf + rc);
+                cmd = upper_ascii(trim(cmd));
+                if (cmd == "START") {
+                    if (runState.load(std::memory_order_relaxed) == 0) {
+                        startRequested.store(true, std::memory_order_relaxed);
+                        reply = "OK starting\n";
+                    } else {
+                        reply = "OK already running\n";
+                    }
+                } else if (cmd == "STOP") {
+                    g_stopRequested.store(true, std::memory_order_relaxed);
+                    reply = "OK stop requested\n";
+                } else if (cmd == "STATUS") {
+                    reply = (runState.load(std::memory_order_relaxed) == 0) ? "IDLE\n" : "RUNNING\n";
+                } else if (cmd == "QUIT" || cmd == "EXIT") {
+                    g_stopRequested.store(true, std::memory_order_relaxed);
+                    remoteQuit.store(true, std::memory_order_relaxed);
+                    reply = "OK quitting\n";
+                } else {
+                    reply = "ERR unknown command\n";
+                }
+            }
+            send(clientSock, reply.data(), static_cast<int>(reply.size()), 0);
+            closeSock(clientSock);
+        }
+
+        remoteQuit.store(true, std::memory_order_relaxed);
+        g_stopRequested.store(true, std::memory_order_relaxed);
+        if (worker.joinable()) {
+            worker.join();
+        }
+        closeSock(listenSock);
     } catch (const std::exception& e) {
         std::cerr << "[Bot] 异常退出: " << e.what() << "\n";
         return -2;
