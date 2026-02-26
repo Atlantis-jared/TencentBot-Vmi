@@ -52,7 +52,7 @@
 - 每个 `tick` 最多推进一个业务步骤，`next_op` 作为分发条件
 - `goal_branch` 优先级高于普通步骤分支（达标后立即回帮提交）
 - `cycle_restart_if_needed` 仅在 `next_op == steps.size()` 时触发新一轮 cycle
-- 长耗时动作采用“异步启动 + Running 轮询”实现，`tick()` 本身保持非阻塞
+- step 动作采用“协作式状态机”返回 `Running/Success/Failure`，`tick()` 本身保持非阻塞
 
 收益：
 

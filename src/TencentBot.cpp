@@ -1144,18 +1144,26 @@ void TencentBot::runTradingRoute() {
         return -10;
     };
 
-    auto step6_returnAndSubmit = [&]() {
-        BOT_LOG("TencentBot", "[6/6] 达标回帮派 + 提交银票");
+    auto step6_returnAndSubmit = [&]() -> domain::TreeStatus {
         checkStop(stopSignal_);
+        BOT_LOG("TencentBot", "[6/6] 达标回帮派 + 提交银票");
 
-        std::string curMap = vision.getCurrentMapName();
-        if (curMap == "beijuluzhou")   { route_beijuluzhou_to_changan(); curMap = vision.getCurrentMapName(); }
-        if (curMap == "difu")          { route_leaveDisfu(); curMap = vision.getCurrentMapName(); }
-        if (curMap == "datangguojing") { route_datangguojing_to_changancheng(); curMap = vision.getCurrentMapName(); }
-        
+        const std::string curMap = vision.getCurrentMapName();
+        if (curMap == "beijuluzhou") {
+            route_beijuluzhou_to_changan();
+            return domain::TreeStatus::Running;
+        }
+        if (curMap == "difu") {
+            route_leaveDisfu();
+            return domain::TreeStatus::Running;
+        }
+        if (curMap == "datangguojing") {
+            route_datangguojing_to_changancheng();
+            return domain::TreeStatus::Running;
+        }
         if (curMap == "changancheng") {
             route_changan_to_bangpai();
-            curMap = vision.getCurrentMapName();
+            return domain::TreeStatus::Running;
         }
 
         if (curMap == "bangpai" || curMap == "jinku") {
@@ -1168,217 +1176,346 @@ void TencentBot::runTradingRoute() {
         BOT_ERR("TencentBot", "当前地图不在回城路径上(" << curMap << ")，请手动回城完成最后提交");
         ck.last_op_name = "return_path_unexpected_map";
         (void)store.save(ck);
+        return domain::TreeStatus::Failure;
     };
 
-    auto tryReturnToGangIfReached = [&](const char* afterWhat, int money) {
+    auto tryReturnToGangIfReached = [&](const char* afterWhat, int money) -> bool {
         checkStop(stopSignal_);
         BOT_LOG("TencentBot", "(" << afterWhat << ") 银票=" << money << " 目标=" << ck.target_money);
-        if (!(money >= 0 && money >= ck.target_money)) return;
+        if (!(money >= 0 && money >= ck.target_money)) return false;
 
         BOT_LOG("TencentBot", "已达标，记录断点并跳转到回帮步骤");
         ck.is_goal_reached = true;
         ck.last_op_name = std::string("goal_reached_after_") + afterWhat;
         (void)store.save(ck); // 保存关键的 is_goal_reached 状态
-
-        // 立即执行回帮逻辑
-        step6_returnAndSubmit();
+        return true;
     };
 
     // --- 6 个操作步骤 ---
-    auto step0_leaveBangpaiToDifu = [&]() {
-        BOT_LOG("TencentBot", "[1/6] 出帮派 → 长安 → 大唐国境 → 地府");
+    struct Step0State {
+        int phase = 0;
+    };
+    auto step0State = std::make_shared<Step0State>();
+    auto step0_leaveBangpaiToDifu = [&, step0State]() -> domain::TreeStatus {
         checkStop(stopSignal_);
-        route_leaveBangpai();
-        route_changan_to_datangguojing();
+        if (step0State->phase == 0) {
+            BOT_LOG("TencentBot", "[1/6] 出帮派 → 长安 → 大唐国境 → 地府");
+            route_leaveBangpai();
+            step0State->phase = 1;
+            return domain::TreeStatus::Running;
+        }
+        if (step0State->phase == 1) {
+            route_changan_to_datangguojing();
+            step0State->phase = 2;
+            return domain::TreeStatus::Running;
+        }
         route_datangguojing_to_difu();
+        step0State->phase = 0;
+        return domain::TreeStatus::Success;
     };
 
-    auto step1_difuBuyPaper = [&]() {
-        BOT_LOG("TencentBot", "[2/6] 地府买纸钱");
-        
-        while (true) {
-            checkStop(stopSignal_);
-            std::string bestMerchant = ck.preferred_difu_merchant;
-            int price1 = -1, price2 = -1;
+    struct Step1State {
+        int phase = 0;
+        int price1 = -1;
+        int price2 = -1;
+        std::string bestMerchant;
+        std::string otherMerchant;
+        std::chrono::steady_clock::time_point retryAt{};
+    };
+    auto step1State = std::make_shared<Step1State>();
+    auto step1_difuBuyPaper = [&, step1State]() -> domain::TreeStatus {
+        checkStop(stopSignal_);
+        if (step1State->phase == 0) {
+            BOT_LOG("TencentBot", "[2/6] 地府买纸钱");
+            step1State->price1 = -1;
+            step1State->price2 = -1;
+            step1State->bestMerchant = ck.preferred_difu_merchant;
 
-            if (!bestMerchant.empty()) {
-                BOT_LOG("TencentBot", "  使用首选地府商人: " << bestMerchant);
+            if (!step1State->bestMerchant.empty()) {
+                BOT_LOG("TencentBot", "  使用首选地府商人: " << step1State->bestMerchant);
             } else {
-                 // 首次运行，需要比价
-                 walkToDifuUpperMerchant();
-                 price1 = queryNpcBuyPrice("地府货商", "纸钱");
-                 if (price1 < 0) { Sleep(Timing::UI_UPDATE_DELAY_MS); walkToDifuUpperMerchant(); price1 = queryNpcBuyPrice("地府货商", "纸钱"); }
-                 BOT_LOG("TencentBot", "  地府货商 纸钱买价=" << (price1 > 0 ? std::to_string(price1) : "失败"));
+                // 首次运行，需要比价
+                walkToDifuUpperMerchant();
+                step1State->price1 = queryNpcBuyPrice("地府货商", "纸钱");
+                if (step1State->price1 < 0) {
+                    Sleep(Timing::UI_UPDATE_DELAY_MS);
+                    walkToDifuUpperMerchant();
+                    step1State->price1 = queryNpcBuyPrice("地府货商", "纸钱");
+                }
+                BOT_LOG("TencentBot", "  地府货商 纸钱买价="
+                        << (step1State->price1 > 0 ? std::to_string(step1State->price1) : "失败"));
 
-                 if (price1 > 0 && price1 <= TradeThreshold::PAPER_BUY_PRICE_MAX) {
-                     bestMerchant = "地府货商";
-                 } else {
-                     walkToDifuLowerMerchant();
-                     price2 = queryNpcBuyPrice("地府商人", "纸钱");
-                     if (price2 < 0) { Sleep(Timing::UI_UPDATE_DELAY_MS); walkToDifuLowerMerchant(); price2 = queryNpcBuyPrice("地府商人", "纸钱"); }
-                     BOT_LOG("TencentBot", "  地府商人 纸钱买价=" << (price2 > 0 ? std::to_string(price2) : "失败"));
+                if (step1State->price1 > 0 && step1State->price1 <= TradeThreshold::PAPER_BUY_PRICE_MAX) {
+                    step1State->bestMerchant = "地府货商";
+                } else {
+                    walkToDifuLowerMerchant();
+                    step1State->price2 = queryNpcBuyPrice("地府商人", "纸钱");
+                    if (step1State->price2 < 0) {
+                        Sleep(Timing::UI_UPDATE_DELAY_MS);
+                        walkToDifuLowerMerchant();
+                        step1State->price2 = queryNpcBuyPrice("地府商人", "纸钱");
+                    }
+                    BOT_LOG("TencentBot", "  地府商人 纸钱买价="
+                            << (step1State->price2 > 0 ? std::to_string(step1State->price2) : "失败"));
 
-                     if (price1 > 0 && (price2 < 0 || price1 <= price2)) bestMerchant = "地府货商";
-                     else bestMerchant = "地府商人";
-                 }
-                 ck.preferred_difu_merchant = bestMerchant;
-                 (void)store.save(ck);
-            }
-
-            // --- 执行购买 ---
-            std::string otherMerchant = (bestMerchant == "地府货商") ? "地府商人" : "地府货商";
-            
-            // 尝试首选
-            if (bestMerchant == "地府货商") walkToDifuUpperMerchant(); else walkToDifuLowerMerchant();
-            if (buyItemFromNpc(bestMerchant, "纸钱")) {
-                lastPaperBuyPrice = (price1 > 0) ? price1 : (price2 > 0 ? price2 : 2700);
-                BOT_LOG("TencentBot", "  购买成功，价格(估)=" << lastPaperBuyPrice);
-                return;
-            }
-
-            // 首选失败（可能卖完了），尝试另一个
-            BOT_WARN("TencentBot", "首选商人 " << bestMerchant << " 购买失败，尝试备选 " << otherMerchant);
-            if (otherMerchant == "地府货商") walkToDifuUpperMerchant(); else walkToDifuLowerMerchant();
-            if (buyItemFromNpc(otherMerchant, "纸钱")) {
-                lastPaperBuyPrice = (price2 > 0) ? price2 : (price1 > 0 ? price1 : 2700);
-                BOT_LOG("TencentBot", "  备选购买成功，价格(估)=" << lastPaperBuyPrice);
-                // 既然备选买到了，以后就先看备选
-                ck.preferred_difu_merchant = otherMerchant;
+                    if (step1State->price1 > 0 &&
+                        (step1State->price2 < 0 || step1State->price1 <= step1State->price2)) {
+                        step1State->bestMerchant = "地府货商";
+                    } else {
+                        step1State->bestMerchant = "地府商人";
+                    }
+                }
+                ck.preferred_difu_merchant = step1State->bestMerchant;
                 (void)store.save(ck);
-                return;
             }
 
-            BOT_WARN("TencentBot", "地府纸钱可能全卖完了，等待 30 秒重试...");
-            Sleep(30000);
+            step1State->otherMerchant =
+                (step1State->bestMerchant == "地府货商") ? "地府商人" : "地府货商";
+            step1State->phase = 1;
+            return domain::TreeStatus::Running;
+        }
+
+        if (step1State->phase == 1) {
+            if (step1State->bestMerchant == "地府货商") walkToDifuUpperMerchant(); else walkToDifuLowerMerchant();
+            if (buyItemFromNpc(step1State->bestMerchant, "纸钱")) {
+                lastPaperBuyPrice = (step1State->price1 > 0) ? step1State->price1 :
+                                    ((step1State->price2 > 0) ? step1State->price2 : 2700);
+                BOT_LOG("TencentBot", "  购买成功，价格(估)=" << lastPaperBuyPrice);
+                step1State->phase = 0;
+                return domain::TreeStatus::Success;
+            }
+            BOT_WARN("TencentBot", "首选商人 " << step1State->bestMerchant
+                    << " 购买失败，尝试备选 " << step1State->otherMerchant);
+            step1State->phase = 2;
+            return domain::TreeStatus::Running;
+        }
+
+        if (step1State->phase == 2) {
+            if (step1State->otherMerchant == "地府货商") walkToDifuUpperMerchant(); else walkToDifuLowerMerchant();
+            if (buyItemFromNpc(step1State->otherMerchant, "纸钱")) {
+                lastPaperBuyPrice = (step1State->price2 > 0) ? step1State->price2 :
+                                    ((step1State->price1 > 0) ? step1State->price1 : 2700);
+                BOT_LOG("TencentBot", "  备选购买成功，价格(估)=" << lastPaperBuyPrice);
+                ck.preferred_difu_merchant = step1State->otherMerchant;
+                (void)store.save(ck);
+                step1State->phase = 0;
+                return domain::TreeStatus::Success;
+            }
+            BOT_WARN("TencentBot", "地府纸钱可能全卖完了，30 秒后重试...");
+            step1State->retryAt = std::chrono::steady_clock::now() + std::chrono::seconds(30);
+            step1State->phase = 3;
+            return domain::TreeStatus::Running;
+        }
+
+        if (std::chrono::steady_clock::now() < step1State->retryAt) {
+            return domain::TreeStatus::Running;
+        }
+        step1State->phase = 0;
+        return domain::TreeStatus::Running;
+    };
+
+    struct Step2State {
+        int phase = 0;
+    };
+    auto step2State = std::make_shared<Step2State>();
+    auto step2_travelToBeiju = [&, step2State]() -> domain::TreeStatus {
+        checkStop(stopSignal_);
+        if (step2State->phase == 0) {
+            BOT_LOG("TencentBot", "[3/6] 地府 → … → 北俱泸州（8段传送）");
+        }
+        switch (step2State->phase) {
+            case 0: route_leaveDisfu(); step2State->phase = 1; return domain::TreeStatus::Running;
+            case 1: route_datangguojing_to_chishuizhou(); step2State->phase = 2; return domain::TreeStatus::Running;
+            case 2: route_chishuizhou_to_nvbamu(); step2State->phase = 3; return domain::TreeStatus::Running;
+            case 3: route_nvbamu_to_donghaiyandong(); step2State->phase = 4; return domain::TreeStatus::Running;
+            case 4: route_donghaiyandong_to_donghaiwan(); step2State->phase = 5; return domain::TreeStatus::Running;
+            case 5: route_donghaiwan_to_aolaiguo(); step2State->phase = 6; return domain::TreeStatus::Running;
+            case 6: route_aolaiguo_to_huaguoshan(); step2State->phase = 7; return domain::TreeStatus::Running;
+            case 7:
+                route_huaguoshan_to_beijuluzhou();
+                step2State->phase = 0;
+                return domain::TreeStatus::Success;
+            default:
+                step2State->phase = 0;
+                return domain::TreeStatus::Failure;
         }
     };
 
-    auto step2_travelToBeiju = [&]() {
-        BOT_LOG("TencentBot", "[3/6] 地府 → … → 北俱泸州（8段传送）");
-        checkStop(stopSignal_);
-        route_leaveDisfu();
-        route_datangguojing_to_chishuizhou();
-        route_chishuizhou_to_nvbamu();
-        route_nvbamu_to_donghaiyandong();
-        route_donghaiyandong_to_donghaiwan();
-        route_donghaiwan_to_aolaiguo();
-        route_aolaiguo_to_huaguoshan();
-        route_huaguoshan_to_beijuluzhou();
+    struct Step3State {
+        int phase = 0;
+        int salePrice1 = -1;
+        int salePrice2 = -1;
+        std::string sellTarget;
+        std::string buyTarget;
+        std::chrono::steady_clock::time_point retryAt{};
     };
-
-    auto step3_beixuSellPaperBuyOil = [&]() {
-        BOT_LOG("TencentBot", "[4/6] 北俱: 卖纸钱 + 买油");
+    auto step3State = std::make_shared<Step3State>();
+    auto step3_beixuSellPaperBuyOil = [&, step3State]() -> domain::TreeStatus {
         checkStop(stopSignal_);
+        if (step3State->phase == 0) {
+            BOT_LOG("TencentBot", "[4/6] 北俱: 卖纸钱 + 买油");
+            walkToBeixuUpperMerchant();
+            step3State->salePrice1 = queryNpcSalePrice("北俱货商", "纸钱");
+            if (step3State->salePrice1 < 0) {
+                Sleep(Timing::UI_UPDATE_DELAY_MS);
+                walkToBeixuUpperMerchant();
+                step3State->salePrice1 = queryNpcSalePrice("北俱货商", "纸钱");
+            }
+            BOT_LOG("TencentBot", "  北俱货商 纸钱收购价=" << step3State->salePrice1);
 
-        // 1. 必查两个商人的卖价（纸钱）
-        walkToBeixuUpperMerchant();
-        int salePrice1 = queryNpcSalePrice("北俱货商", "纸钱");
-        if (salePrice1 < 0) { Sleep(Timing::UI_UPDATE_DELAY_MS); walkToBeixuUpperMerchant(); salePrice1 = queryNpcSalePrice("北俱货商", "纸钱"); }
-        BOT_LOG("TencentBot", "  北俱货商 纸钱收购价=" << salePrice1);
+            walkToBeixuLowerMerchant();
+            step3State->salePrice2 = queryNpcSalePrice("北俱商人", "纸钱");
+            if (step3State->salePrice2 < 0) {
+                Sleep(Timing::UI_UPDATE_DELAY_MS);
+                walkToBeixuLowerMerchant();
+                step3State->salePrice2 = queryNpcSalePrice("北俱商人", "纸钱");
+            }
+            BOT_LOG("TencentBot", "  北俱商人 纸钱收购价=" << step3State->salePrice2);
 
-        checkStop(stopSignal_);
-        walkToBeixuLowerMerchant();
-        int salePrice2 = queryNpcSalePrice("北俱商人", "纸钱");
-        if (salePrice2 < 0) { Sleep(Timing::UI_UPDATE_DELAY_MS); walkToBeixuLowerMerchant(); salePrice2 = queryNpcSalePrice("北俱商人", "纸钱"); }
-        BOT_LOG("TencentBot", "  北俱商人 纸钱收购价=" << salePrice2);
-
-        // 2. 决策：谁卖价高给谁卖，然后去另一个买油
-        std::string sellTarget, buyTarget;
-        if (salePrice1 >= salePrice2) {
-             sellTarget = "北俱货商"; // Upper
-             buyTarget  = "北俱商人"; // Lower
-        } else {
-             sellTarget = "北俱商人"; // Lower
-             buyTarget  = "北俱货商"; // Upper
+            if (step3State->salePrice1 >= step3State->salePrice2) {
+                step3State->sellTarget = "北俱货商";
+                step3State->buyTarget = "北俱商人";
+            } else {
+                step3State->sellTarget = "北俱商人";
+                step3State->buyTarget = "北俱货商";
+            }
+            BOT_LOG("TencentBot", "  决策: 卖给 " << step3State->sellTarget
+                    << "，从 " << step3State->buyTarget << " 买油");
+            step3State->phase = 1;
+            return domain::TreeStatus::Running;
         }
 
-        BOT_LOG("TencentBot", "  决策: 卖给 " << sellTarget << "，从 " << buyTarget << " 买油");
-
-        // 3. 执行卖出
-        if (sellTarget == "北俱货商") walkToBeixuUpperMerchant();
-        else walkToBeixuLowerMerchant();
-        
-        int paperMoney = sellItemToNpc(sellTarget, "纸钱");
-        tryReturnToGangIfReached("beiju_sale_paper", paperMoney);
-
-        // 4. 执行买入（带缺货重试）
-        while (true) {
-            checkStop(stopSignal_);
-            if (buyTarget == "北俱货商") walkToBeixuUpperMerchant();
+        if (step3State->phase == 1) {
+            if (step3State->sellTarget == "北俱货商") walkToBeixuUpperMerchant();
             else walkToBeixuLowerMerchant();
 
-            BOT_LOG("TencentBot", "  尝试向 " << buyTarget << " 买油");
-            if (buyItemFromNpc(buyTarget, "油")) {
-                lastOilBuyPrice = 3500; // 估值
-                return;
-            }
+            const int paperMoney = sellItemToNpc(step3State->sellTarget, "纸钱");
+            (void)tryReturnToGangIfReached("beiju_sale_paper", paperMoney);
+            step3State->phase = 2;
+            return domain::TreeStatus::Running;
+        }
 
-            // 首选失败，尝试另一个
-            std::string altTarget = (buyTarget == "北俱货商") ? "北俱商人" : "北俱货商";
-            BOT_WARN("TencentBot", "首选买油商人 " << buyTarget << " 缺货，尝试备选 " << altTarget);
+        if (step3State->phase == 2) {
+            if (step3State->buyTarget == "北俱货商") walkToBeixuUpperMerchant();
+            else walkToBeixuLowerMerchant();
+            BOT_LOG("TencentBot", "  尝试向 " << step3State->buyTarget << " 买油");
+            if (buyItemFromNpc(step3State->buyTarget, "油")) {
+                lastOilBuyPrice = 3500;
+                step3State->phase = 0;
+                return domain::TreeStatus::Success;
+            }
+            step3State->phase = 3;
+            return domain::TreeStatus::Running;
+        }
+
+        if (step3State->phase == 3) {
+            const std::string altTarget =
+                (step3State->buyTarget == "北俱货商") ? "北俱商人" : "北俱货商";
+            BOT_WARN("TencentBot", "首选买油商人 " << step3State->buyTarget
+                    << " 缺货，尝试备选 " << altTarget);
             if (altTarget == "北俱货商") walkToBeixuUpperMerchant(); else walkToBeixuLowerMerchant();
             if (buyItemFromNpc(altTarget, "油")) {
                 lastOilBuyPrice = 3500;
-                return;
+                step3State->phase = 0;
+                return domain::TreeStatus::Success;
             }
-
-            BOT_WARN("TencentBot", "北俱油可能全卖完了，等待 30 秒重试...");
-            Sleep(30000);
+            BOT_WARN("TencentBot", "北俱油可能全卖完了，30 秒后重试...");
+            step3State->retryAt = std::chrono::steady_clock::now() + std::chrono::seconds(30);
+            step3State->phase = 4;
+            return domain::TreeStatus::Running;
         }
+
+        if (std::chrono::steady_clock::now() < step3State->retryAt) {
+            return domain::TreeStatus::Running;
+        }
+        step3State->phase = 2;
+        return domain::TreeStatus::Running;
     };
 
-    auto step4_returnToDifu = [&]() {
-        BOT_LOG("TencentBot", "[5/6] 北俱 → 长安 → 大唐国境 → 地府");
+    struct Step4State {
+        int phase = 0;
+    };
+    auto step4State = std::make_shared<Step4State>();
+    auto step4_returnToDifu = [&, step4State]() -> domain::TreeStatus {
         checkStop(stopSignal_);
-        route_beijuluzhou_to_changan();
-        route_changan_to_datangguojing();
+        if (step4State->phase == 0) {
+            BOT_LOG("TencentBot", "[5/6] 北俱 → 长安 → 大唐国境 → 地府");
+            route_beijuluzhou_to_changan();
+            step4State->phase = 1;
+            return domain::TreeStatus::Running;
+        }
+        if (step4State->phase == 1) {
+            route_changan_to_datangguojing();
+            step4State->phase = 2;
+            return domain::TreeStatus::Running;
+        }
         route_datangguojing_to_difu();
+        step4State->phase = 0;
+        return domain::TreeStatus::Success;
     };
 
-    auto step5_difuSellOil = [&]() {
-        BOT_LOG("TencentBot", "[6/6] 地府卖油");
+    struct Step5State {
+        int phase = 0;
+        int oilSalePrice1 = -1;
+        int oilSalePrice2 = -1;
+        std::string sellTarget;
+        std::string nextBuyTarget;
+    };
+    auto step5State = std::make_shared<Step5State>();
+    auto step5_difuSellOil = [&, step5State]() -> domain::TreeStatus {
         checkStop(stopSignal_);
-
-        // 1. 必查两个商人的卖价（油）
-        walkToDifuUpperMerchant();
-        int oilSalePrice1 = queryNpcSalePrice("地府货商", "油");
-        if (oilSalePrice1 < 0) { Sleep(Timing::UI_UPDATE_DELAY_MS); walkToDifuUpperMerchant(); oilSalePrice1 = queryNpcSalePrice("地府货商", "油"); }
-        BOT_LOG("TencentBot", "  地府货商 油收购价=" << oilSalePrice1);
-
-        checkStop(stopSignal_);
-        walkToDifuLowerMerchant();
-        int oilSalePrice2 = queryNpcSalePrice("地府商人", "油");
-        if (oilSalePrice2 < 0) { Sleep(Timing::UI_UPDATE_DELAY_MS); walkToDifuLowerMerchant(); oilSalePrice2 = queryNpcSalePrice("地府商人", "油"); }
-        BOT_LOG("TencentBot", "  地府商人 油收购价=" << oilSalePrice2);
-
-        // 2. 决策：谁卖价高给谁卖，然后标记另一个为"买入首选"（用于下一轮买纸钱）
-        std::string sellTarget, nextBuyTarget;
-        if (oilSalePrice1 >= oilSalePrice2) {
-             sellTarget    = "地府货商"; // Upper
-             nextBuyTarget = "地府商人"; // Lower
-        } else {
-             sellTarget    = "地府商人"; // Lower
-             nextBuyTarget = "地府货商"; // Upper
+        if (step5State->phase == 0) {
+            BOT_LOG("TencentBot", "[6/6] 地府卖油");
+            walkToDifuUpperMerchant();
+            step5State->oilSalePrice1 = queryNpcSalePrice("地府货商", "油");
+            if (step5State->oilSalePrice1 < 0) {
+                Sleep(Timing::UI_UPDATE_DELAY_MS);
+                walkToDifuUpperMerchant();
+                step5State->oilSalePrice1 = queryNpcSalePrice("地府货商", "油");
+            }
+            BOT_LOG("TencentBot", "  地府货商 油收购价=" << step5State->oilSalePrice1);
+            step5State->phase = 1;
+            return domain::TreeStatus::Running;
         }
 
-        BOT_LOG("TencentBot", "  决策: 卖给 " << sellTarget << "，下一轮首选买家更新为 " << nextBuyTarget);
+        if (step5State->phase == 1) {
+            walkToDifuLowerMerchant();
+            step5State->oilSalePrice2 = queryNpcSalePrice("地府商人", "油");
+            if (step5State->oilSalePrice2 < 0) {
+                Sleep(Timing::UI_UPDATE_DELAY_MS);
+                walkToDifuLowerMerchant();
+                step5State->oilSalePrice2 = queryNpcSalePrice("地府商人", "油");
+            }
+            BOT_LOG("TencentBot", "  地府商人 油收购价=" << step5State->oilSalePrice2);
 
-        // 3. 执行卖出
-        if (sellTarget == "地府货商") walkToDifuUpperMerchant();
+            if (step5State->oilSalePrice1 >= step5State->oilSalePrice2) {
+                step5State->sellTarget = "地府货商";
+                step5State->nextBuyTarget = "地府商人";
+            } else {
+                step5State->sellTarget = "地府商人";
+                step5State->nextBuyTarget = "地府货商";
+            }
+            BOT_LOG("TencentBot", "  决策: 卖给 " << step5State->sellTarget
+                    << "，下一轮首选买家更新为 " << step5State->nextBuyTarget);
+            step5State->phase = 2;
+            return domain::TreeStatus::Running;
+        }
+
+        if (step5State->sellTarget == "地府货商") walkToDifuUpperMerchant();
         else walkToDifuLowerMerchant();
-        
-        int money = sellItemToNpc(sellTarget, "油");
-        tryReturnToGangIfReached("difu_sale_oil", money);
-        
-        // 4. 更新首选（给 Step 1 用）
-        ck.preferred_difu_merchant = nextBuyTarget;
+
+        const int money = sellItemToNpc(step5State->sellTarget, "油");
+        (void)tryReturnToGangIfReached("difu_sale_oil", money);
+        ck.preferred_difu_merchant = step5State->nextBuyTarget;
         (void)store.save(ck);
+        step5State->phase = 0;
+        return domain::TreeStatus::Success;
     };
 
     // --- 操作表（名称 + 函数）---
     struct TradeStep {
         const char* name;
-        std::function<void()> execute;
+        std::function<domain::TreeStatus()> execute;
     };
     std::vector<TradeStep> steps = {
         {"leave_gang_to_difu",       step0_leaveBangpaiToDifu},
@@ -1428,11 +1565,7 @@ void TencentBot::runTradingRoute() {
     // 当银票达标后，该动作负责执行最终提交流程。
     // step6_returnAndSubmit 内部在成功时会抛 GoalReachedException 结束主循环。
     auto btGoalAction = [&]() -> domain::TreeStatus {
-        step6_returnAndSubmit();
-        // 理论上若未抛异常，说明流程未真正收敛；短暂等待后让下一 tick 重试。
-        BOT_WARN("TencentBot", "回帮步骤未完成，等待 5 秒后重试...");
-        Sleep(5000);
-        return domain::TreeStatus::Success;
+        return step6_returnAndSubmit();
     };
 
     // 封装单步执行（供每个 step Action 节点复用）。
@@ -1443,7 +1576,10 @@ void TencentBot::runTradingRoute() {
         checkStop(stopSignal_);
         BOT_LOG("TencentBot", "=== step " << i << "/" << steps.size()
                 << " : " << steps[i].name << " (cycle=" << ck.cycle << ") ===");
-        steps[i].execute();
+        const domain::TreeStatus stepStatus = steps[i].execute();
+        if (stepStatus != domain::TreeStatus::Success) {
+            return stepStatus;
+        }
 
         if (!ck.is_goal_reached) {
             // 仅在未达标时推进断点；达标分支会由 goal_branch 接管。
