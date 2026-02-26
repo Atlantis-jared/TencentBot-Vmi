@@ -136,10 +136,10 @@ void TencentBot::moveCharacterTo(int targetX, int targetY, int processIndex) {
         if (intMoveX != 0 || intMoveY != 0) {
             IbSendMouseMove(intMoveX, intMoveY, Send::MoveMode::Relative);
         }
-        Sleep(1 + randomInt(0, 1));
+        domain::sleep_interruptible(stopSignal_, 1 + randomInt(0, 1));
     }
 
-    Sleep(15 + randomInt(0, 14));
+    domain::sleep_interruptible(stopSignal_, 15 + randomInt(0, 14));
     double prevDistToTarget = 1e9;
     int noImprovementCount = 0;
 
@@ -173,7 +173,7 @@ void TencentBot::moveCharacterTo(int targetX, int targetY, int processIndex) {
         }
 
         IbSendMouseMove(corrX, corrY, Send::MoveMode::Relative);
-        Sleep(10 + randomInt(0, 4));
+        domain::sleep_interruptible(stopSignal_, 10 + randomInt(0, 4));
     }
 }
 
@@ -198,7 +198,7 @@ void TencentBot::clickMapPosition(const std::string& mapName, int gameX, int gam
     MapUiLocation uiLoc = vision.locateMapUiOnScreen(mapName);
     for (int attempt = 1; !uiLoc.found && attempt < MAP_UI_MAX_ATTEMPTS; ++attempt) {
         BOT_WARN("TencentBot", "小地图 UI 定位失败: " << mapName << "，重试 " << attempt << "/" << (MAP_UI_MAX_ATTEMPTS - 1));
-        Sleep(MAP_UI_RETRY_WAIT_MS);
+        domain::sleep_interruptible(stopSignal_, MAP_UI_RETRY_WAIT_MS);
         uiLoc = vision.locateMapUiOnScreen(mapName);
     }
     if (!uiLoc.found) {
@@ -222,17 +222,17 @@ void TencentBot::clickUiElement(int screenX, int screenY, int extraOffX, int ext
         offset.x + extraOffX,
         offset.y + extraOffY);
     IbSendMouseClick(Send::MouseButton::Left);
-    Sleep(timing().ui_update_delay_ms);
+    domain::sleep_interruptible(stopSignal_, timing().ui_update_delay_ms);
 }
 
 void TencentBot::hideOtherPlayers() {
     Send::KeyboardModifiers altKey{ 0 };
     altKey.LAlt = true;
     IbSendKeybdDownUp('H', altKey);
-    Sleep(timing().key_action_delay_ms);
+    domain::sleep_interruptible(stopSignal_, timing().key_action_delay_ms);
     IbSendKeybdDown(VK_F9);
     IbSendKeybdUp(VK_F9);
-    Sleep(timing().key_action_delay_ms);
+    domain::sleep_interruptible(stopSignal_, timing().key_action_delay_ms);
 }
 
 bool TencentBot::clickNpcIfFound(const std::string& npcName, int clickOffsetX, int clickOffsetY) {
@@ -252,15 +252,15 @@ void TencentBot::walkToPosition(const std::string& mapName, int targetX, int tar
 
     IbSendKeybdDown(VK_TAB);
     IbSendKeybdUp(VK_TAB);
-    Sleep(timing().key_action_delay_ms);
+    domain::sleep_interruptible(stopSignal_, timing().key_action_delay_ms);
 
     clickMapPosition(mapName, targetX, targetY, 0);
     IbSendMouseClick(Send::MouseButton::Left);
-    Sleep(timing().ui_update_delay_ms);
+    domain::sleep_interruptible(stopSignal_, timing().ui_update_delay_ms);
 
     IbSendKeybdDown(VK_TAB);
     IbSendKeybdUp(VK_TAB);
-    Sleep(timing().key_action_delay_ms);
+    domain::sleep_interruptible(stopSignal_, timing().key_action_delay_ms);
 
     int elapsedMs = 0;
     int stagnantIters = 0;
@@ -289,26 +289,26 @@ void TencentBot::walkToPosition(const std::string& mapName, int targetX, int tar
 
             IbSendKeybdDown(VK_TAB);
             IbSendKeybdUp(VK_TAB);
-            Sleep(timing().key_action_delay_ms);
+            domain::sleep_interruptible(stopSignal_, timing().key_action_delay_ms);
             clickMapPosition(mapName, targetX, targetY, 0);
             IbSendMouseClick(Send::MouseButton::Left);
-            Sleep(timing().ui_update_delay_ms);
+            domain::sleep_interruptible(stopSignal_, timing().ui_update_delay_ms);
             IbSendKeybdDown(VK_TAB);
             IbSendKeybdUp(VK_TAB);
-            Sleep(timing().key_action_delay_ms);
+            domain::sleep_interruptible(stopSignal_, timing().key_action_delay_ms);
 
             stagnantIters = 0;
             lastClickElapsedMs = elapsedMs;
         }
 
-        Sleep(WalkConfig::POLL_INTERVAL_MS);
+        domain::sleep_interruptible(stopSignal_, WalkConfig::POLL_INTERVAL_MS);
         elapsedMs += WalkConfig::POLL_INTERVAL_MS;
     }
 
     if (elapsedMs >= WalkConfig::TIMEOUT_MS) {
         BOT_WARN("TencentBot", "寻路最终超时: " << mapName << " (" << targetX << "," << targetY << ")");
     }
-    Sleep(timing().ui_update_delay_ms);
+    domain::sleep_interruptible(stopSignal_, timing().ui_update_delay_ms);
 }
 
 bool TencentBot::tryNpcTeleport(const std::string& npcName,
@@ -323,25 +323,25 @@ bool TencentBot::tryNpcTeleport(const std::string& npcName,
         BOT_LOG("TencentBot", "  尝试 " << (attempt + 1) << "/" << maxRetries);
         if (attempt > 0) {
             hideOtherPlayers();
-            Sleep(timing().key_action_delay_ms);
+            domain::sleep_interruptible(stopSignal_, timing().key_action_delay_ms);
             walkToPosition(retryWalkMap, retryWalkX, retryWalkY);
-            Sleep(timing().ui_update_delay_ms);
+            domain::sleep_interruptible(stopSignal_, timing().ui_update_delay_ms);
         }
         if (clickNpcIfFound(npcName, npcClickOffX, npcClickOffY)) {
             domain::check_stop_or_throw(stopSignal_);
             clickUiElement(menuClickX, menuClickY);
-            Sleep(timing().map_change_delay_ms);
+            domain::sleep_interruptible(stopSignal_, timing().map_change_delay_ms);
             std::string currentMap = vision.getCurrentMapName();
             if (currentMap == expectedMap) {
                 BOT_LOG("TencentBot", "  到达 " << expectedMap);
-                Sleep(timing().key_action_delay_ms);
+                domain::sleep_interruptible(stopSignal_, timing().key_action_delay_ms);
                 return true;
             }
             if (currentMap == "CaptureEmpty" && screenCapture.recreateIfNeeded()) {
-                Sleep(timing().ui_update_delay_ms);
+                domain::sleep_interruptible(stopSignal_, timing().ui_update_delay_ms);
             }
         }
-        Sleep(300);
+        domain::sleep_interruptible(stopSignal_, 300);
     }
     BOT_ERR("TencentBot", "传送失败: " << expectedMap << " " << maxRetries << " 次后未到达");
     return false;
@@ -357,22 +357,22 @@ bool TencentBot::tryUiTeleport(int clickX, int clickY, int extraOffX, int extraO
         BOT_LOG("TencentBot", "  尝试 " << (attempt + 1) << "/" << maxRetries);
         if (attempt > 0) {
             hideOtherPlayers();
-            Sleep(timing().key_action_delay_ms);
+            domain::sleep_interruptible(stopSignal_, timing().key_action_delay_ms);
             walkToPosition(retryWalkMap, retryWalkX, retryWalkY);
-            Sleep(timing().ui_update_delay_ms);
+            domain::sleep_interruptible(stopSignal_, timing().ui_update_delay_ms);
         }
         clickUiElement(clickX, clickY, extraOffX, extraOffY);
-        Sleep(timing().map_change_delay_ms);
+        domain::sleep_interruptible(stopSignal_, timing().map_change_delay_ms);
         std::string currentMap = vision.getCurrentMapName();
         if (currentMap == expectedMap) {
             BOT_LOG("TencentBot", "  到达 " << expectedMap);
-            Sleep(timing().key_action_delay_ms);
+            domain::sleep_interruptible(stopSignal_, timing().key_action_delay_ms);
             return true;
         }
         if (currentMap == "CaptureEmpty" && screenCapture.recreateIfNeeded()) {
-            Sleep(timing().ui_update_delay_ms);
+            domain::sleep_interruptible(stopSignal_, timing().ui_update_delay_ms);
         }
-        Sleep(300);
+        domain::sleep_interruptible(stopSignal_, 300);
     }
     BOT_ERR("TencentBot", "传送失败: " << expectedMap << " " << maxRetries << " 次后未到达");
     return false;

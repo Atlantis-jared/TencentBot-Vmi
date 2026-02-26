@@ -28,12 +28,12 @@ void TencentBot::process_idiom_verify() {
     Send::KeyboardModifiers m = {0};
     m.LAlt = true;
     IbSendKeybdDownUp('G', m);
-    Sleep(timing().ui_click_delay_ms);
+    domain::sleep_interruptible(stopSignal_, timing().ui_click_delay_ms);
 
     // 点击总管弹出给予界面
     clickUiElement(pos_baihutangzongguan.x, pos_baihutangzongguan.y, 0, -50);
     moveCharacterTo(100, 100, 0); // 移走鼠标避免遮挡
-    Sleep(timing().ui_update_delay_ms);
+    domain::sleep_interruptible(stopSignal_, timing().ui_update_delay_ms);
 
     // 3. 选中银票
     auto v_yinpiao = vision.findNpcOnScreen("银票");
@@ -42,7 +42,7 @@ void TencentBot::process_idiom_verify() {
         return;
     }
     clickUiElement(v_yinpiao[0].x, v_yinpiao[0].y);
-    Sleep(timing().ui_click_delay_ms);
+    domain::sleep_interruptible(stopSignal_, timing().ui_click_delay_ms);
 
     // 4. 点击确定给予
     auto v_confirm = vision.findNpcOnScreen("确定给与");
@@ -52,7 +52,7 @@ void TencentBot::process_idiom_verify() {
     }
     clickUiElement(v_confirm[0].x, v_confirm[0].y);
     moveCharacterTo(100, 100, 0); 
-    Sleep(timing().ui_update_delay_ms * 3); // 等待验证码弹出
+    domain::sleep_interruptible(stopSignal_, timing().ui_update_delay_ms * 3); // 等待验证码弹出
 
     // 5-7. 成语识别 + 点击 + 确认（支持答错重试）
     constexpr int kMaxCaptchaRetries = 3;
@@ -108,7 +108,7 @@ void TencentBot::process_idiom_verify() {
             BOT_LOG("TencentBot", "点击 [ " << charToClick << " ] (" << (i + 1) << "/4)");
             clickUiElement(targetPos.x, targetPos.y);
             moveCharacterTo(100, 100, 0);
-            Sleep(timing().ui_update_delay_ms);
+            domain::sleep_interruptible(stopSignal_, timing().ui_update_delay_ms);
         }
 
         // 7. 点击确认按钮
@@ -117,7 +117,7 @@ void TencentBot::process_idiom_verify() {
             if (!v_chengyuqueren.empty()) {
                 clickUiElement(v_chengyuqueren[0].x, v_chengyuqueren[0].y);
                 moveCharacterTo(100, 100, 0);
-                Sleep(timing().ui_update_delay_ms * 2); // 等待服务器判定结果
+                domain::sleep_interruptible(stopSignal_, timing().ui_update_delay_ms * 2); // 等待服务器判定结果
             } else {
                 BOT_WARN("TencentBot", "未找到「成语确认」按钮");
             }
@@ -133,7 +133,7 @@ void TencentBot::process_idiom_verify() {
         BOT_WARN("TencentBot", "成语答案错误，点击重置 (尝试 " << attempt << "/" << kMaxCaptchaRetries << ")");
         clickUiElement(v_reset[0].x, v_reset[0].y);
         moveCharacterTo(100, 100, 0);
-        Sleep(timing().ui_update_delay_ms * 2); // 等待界面刷新后重新出题
+        domain::sleep_interruptible(stopSignal_, timing().ui_update_delay_ms * 2); // 等待界面刷新后重新出题
     }
     BOT_LOG("TencentBot", "成语验证流程结束");
 }

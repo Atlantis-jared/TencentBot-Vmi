@@ -1,6 +1,7 @@
 #include "TencentBot.h"
 
 #include "BotLogger.h"
+#include "domain/RunControl.h"
 
 #ifdef min
 #undef min
@@ -63,7 +64,7 @@ bool verifyIbMouseRelativeMove(std::string* reason) {
         return false;
     }
 
-    Sleep(40);
+    domain::sleep_interruptible(nullptr, 40);
 
     POINT after{};
     if (!GetCursorPos(&after)) {
@@ -84,7 +85,7 @@ bool verifyIbMouseRelativeMove(std::string* reason) {
 
     if (movedX != 0 || movedY != 0) {
         IbSendMouseMove(static_cast<uint32_t>(-movedX), static_cast<uint32_t>(-movedY), Send::MoveMode::Relative);
-        Sleep(20);
+        domain::sleep_interruptible(nullptr, 20);
     }
 
     if (!ok && reason) {

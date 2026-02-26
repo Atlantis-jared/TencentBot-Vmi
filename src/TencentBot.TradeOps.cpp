@@ -66,7 +66,7 @@ int TencentBot::readItemPrice(int tradeMode, const std::string& itemName) {
     }
 
     moveCharacterTo(200, 200, 0);
-    Sleep(timing().ui_update_delay_ms);
+    domain::sleep_interruptible(stopSignal_, timing().ui_update_delay_ms);
 
     vision.captureToBuffer();
     cv::Mat freshImg(vision.frameH, vision.frameW, CV_8UC4, vision.imageBuffer.data());
@@ -100,7 +100,7 @@ int TencentBot::readItemPrice(int tradeMode, const std::string& itemName) {
 
 int TencentBot::readCurrentMoney() {
     moveCharacterTo(200, 70, 0);
-    Sleep(timing().key_action_delay_ms);
+    domain::sleep_interruptible(stopSignal_, timing().key_action_delay_ms);
 
     vision.captureToBuffer();
     if (vision.imageBuffer.empty()) {
@@ -176,7 +176,7 @@ bool TencentBot::waitForTradePanel() {
         if (!hits.empty()) {
             return true;
         }
-        Sleep(200);
+        domain::sleep_interruptible(stopSignal_, 200);
     }
     BOT_WARN("TencentBot", "等待交易面板超时");
     return false;
@@ -234,7 +234,7 @@ int TencentBot::sellItemToNpc(const std::string& npcName, const std::string& ite
             if (!cancelHits.empty()) {
                 clickUiElement(cancelHits[0].x, cancelHits[0].y);
             }
-            Sleep(timing().ui_click_delay_ms);
+            domain::sleep_interruptible(stopSignal_, timing().ui_click_delay_ms);
         }
 
         if (!clickNpcIfFound(npcName, 0, -40)) {
@@ -274,7 +274,7 @@ int TencentBot::sellItemToNpc(const std::string& npcName, const std::string& ite
             continue;
         }
         clickUiElement(confirmBtn.x, confirmBtn.y);
-        Sleep(timing().trade_confirm_delay_ms);
+        domain::sleep_interruptible(stopSignal_, timing().trade_confirm_delay_ms);
 
         int verifyX = std::max(0, itemCenterX - VERIFY_HALF_SIZE);
         int verifyY = std::max(0, itemCenterY - VERIFY_HALF_SIZE);

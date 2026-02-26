@@ -31,7 +31,7 @@ void TencentBot::route_leaveDisfu() {
     BOT_LOG("TencentBot", "路线: 地府 → 大唐国境（出地府）");
     walkToPosition("difu", 141, 4);
     clickUiElement(751, 709, 6, 57);
-    Sleep(timing().ui_update_delay_ms);
+    domain::sleep_interruptible(stopSignal_, timing().ui_update_delay_ms);
 }
 
 void TencentBot::route_datangguojing_to_chishuizhou() {
@@ -67,7 +67,7 @@ void TencentBot::route_donghaiyandong_to_donghaiwan() {
 void TencentBot::route_donghaiwan_to_aolaiguo() {
     BOT_LOG("TencentBot", "路线: 东海湾 → 傲来国");
     walkToPosition("donghaiwan", 68, 18);
-    Sleep(timing().ui_update_delay_ms);
+    domain::sleep_interruptible(stopSignal_, timing().ui_update_delay_ms);
     tryNpcTeleport("传送傲来", -5, -65, 256, 471, "aolaiguo", "donghaiwan", 68, 18);
 }
 
@@ -80,14 +80,14 @@ void TencentBot::route_aolaiguo_to_huaguoshan() {
 void TencentBot::route_huaguoshan_to_beijuluzhou() {
     BOT_LOG("TencentBot", "路线: 花果山 → 北俱泸州");
     walkToPosition("huaguoshan", 19, 97);
-    Sleep(timing().ui_update_delay_ms);
+    domain::sleep_interruptible(stopSignal_, timing().ui_update_delay_ms);
     tryNpcTeleport("传送北俱", -5, -50, 269, 471, "beijuluzhou", "huaguoshan", 19, 97);
 }
 
 void TencentBot::route_beijuluzhou_to_changan() {
     BOT_LOG("TencentBot", "路线: 北俱泸州 → 长安城");
     walkToPosition("beijuluzhou", 42, 117);
-    Sleep(timing().ui_update_delay_ms);
+    domain::sleep_interruptible(stopSignal_, timing().ui_update_delay_ms);
     tryNpcTeleport("驿站老板", 0, -60, 269, 471, "changancheng", "beijuluzhou", 42, 117);
 }
 
@@ -98,23 +98,23 @@ void TencentBot::route_changan_to_bangpai() {
         domain::check_stop_or_throw(stopSignal_);
 
         walkToPosition("changancheng", 386, 260);
-        Sleep(timing().ui_update_delay_ms);
+        domain::sleep_interruptible(stopSignal_, timing().ui_update_delay_ms);
         if (!clickNpcIfFound("帮派主管", 0, -50)) {
             BOT_WARN("TencentBot", "未找到帮派主管，尝试 " << retry << "/3");
             continue;
         }
 
         clickUiElement(256, 473);
-        Sleep(timing().ui_update_delay_ms);
+        domain::sleep_interruptible(stopSignal_, timing().ui_update_delay_ms);
         clickUiElement(1009, 352, 6, 57);
-        Sleep(timing().ui_update_delay_ms);
-        Sleep(2000);
+        domain::sleep_interruptible(stopSignal_, timing().ui_update_delay_ms);
+        domain::sleep_interruptible(stopSignal_, 2000);
         clickUiElement(831, 338, 6, 57);
-        Sleep(timing().ui_update_delay_ms);
-        Sleep(2000);
+        domain::sleep_interruptible(stopSignal_, timing().ui_update_delay_ms);
+        domain::sleep_interruptible(stopSignal_, 2000);
         clickUiElement(336, 246, 6, 57);
-        Sleep(timing().ui_update_delay_ms);
-        Sleep(2000);
+        domain::sleep_interruptible(stopSignal_, timing().ui_update_delay_ms);
+        domain::sleep_interruptible(stopSignal_, 2000);
 
         std::string curMapName = vision.getCurrentMapName();
         if (curMapName == "bangpai" || curMapName == "jinku") {
@@ -123,7 +123,7 @@ void TencentBot::route_changan_to_bangpai() {
         }
 
         BOT_WARN("TencentBot", "未能进入帮派，重试 " << retry << "/3");
-        Sleep(timing().ui_update_delay_ms);
+        domain::sleep_interruptible(stopSignal_, timing().ui_update_delay_ms);
     }
 
     BOT_ERR("TencentBot", "多次尝试进入帮派失败，请手动检查");
@@ -137,24 +137,24 @@ void TencentBot::route_leaveBangpai() {
     if (curMap == "jinku") {
         BOT_LOG("TencentBot", "识别到金库 UI，点击离开...");
         clickUiElement(824, 708, 6, 57);
-        Sleep(2000);
-        Sleep(timing().ui_update_delay_ms);
+        domain::sleep_interruptible(stopSignal_, 2000);
+        domain::sleep_interruptible(stopSignal_, timing().ui_update_delay_ms);
         curMap = vision.getCurrentMapName();
     }
 
     if (curMap == "bangpai") {
         BOT_LOG("TencentBot", "识别到帮派 UI，点击离开...");
         clickUiElement(7, 521, 6, 57);
-        Sleep(2000);
-        Sleep(timing().ui_update_delay_ms);
+        domain::sleep_interruptible(stopSignal_, 2000);
+        domain::sleep_interruptible(stopSignal_, timing().ui_update_delay_ms);
     }
 
     if (curMap == "Unknown") {
         BOT_WARN("TencentBot", "当前地图 Unknown，尝试按金库/帮派顺序盲点离开...");
         clickUiElement(824, 708, 6, 57);
-        Sleep(1000);
+        domain::sleep_interruptible(stopSignal_, 1000);
         clickUiElement(7, 521, 6, 57);
-        Sleep(timing().ui_update_delay_ms);
+        domain::sleep_interruptible(stopSignal_, timing().ui_update_delay_ms);
     }
 }
 
