@@ -44,6 +44,8 @@ R"(Checkpoint tools:
   --set-next-op <n>           设置 next_op 并退出
   --set-cycle <n>             设置 cycle 并退出
   --set-target-money <n>      设置目标银票（默认 150000）并退出
+  --print-cursor              持续打印当前鼠标坐标（调试模式）
+  --cursor-interval-ms <n>    鼠标坐标打印间隔毫秒（默认 100）
 
 next_op 对应关系（v3）:
   0: leave_gang_to_difu        出帮派 -> 长安 -> 大唐国境 -> 地府
@@ -84,10 +86,12 @@ int main(int argc, char** argv) {
     bool showCk = false;
     bool resetCk = false;
     bool setSomething = false;
+    bool printCursor = false;
     std::string memBackend = "vsock";
     uint32_t vsockCid = 2;
     uint32_t vsockPort = 4050;
     uint32_t vsockTimeoutMs = 5000;
+    uint32_t cursorIntervalMs = 100;
     TradingCheckpoint forced{};
     bool forceNextOp = false, forceCycle = false, forceTarget = false;
 
@@ -121,6 +125,14 @@ int main(int argc, char** argv) {
             int v;
             if (!parseInt(args[++i], v)) { std::cerr << "bad --set-target-money\n"; return 2; }
             forced.target_money = v; forceTarget = true; setSomething = true; continue;
+        }
+        if (a == "--print-cursor") {
+            printCursor = true;
+            continue;
+        }
+        if (a == "--cursor-interval-ms" && i + 1 < argc) {
+            if (!parseU32(args[++i], cursorIntervalMs)) { std::cerr << "bad --cursor-interval-ms\n"; return 2; }
+            continue;
         }
         if (a == "--mem-backend" && i + 1 < argc) {
             memBackend = args[++i];
@@ -191,6 +203,25 @@ int main(int argc, char** argv) {
                       << "\n";
             return 0;
         }
+    }
+
+    if (printCursor) {
+        SetConsoleCtrlHandler(ConsoleCtrlHandler, TRUE);
+        if (cursorIntervalMs == 0) {
+            cursorIntervalMs = 1;
+        }
+        std::cout << "[Bot] 光标坐标打印模式已启动（Ctrl+C 停止），interval="
+                  << cursorIntervalMs << "ms\n";
+        while (!g_stopRequested.load(std::memory_order_relaxed)) {
+            POINT pt{};
+            if (GetCursorPos(&pt)) {
+                std::cout << "[Cursor] x=" << pt.x << " y=" << pt.y << "\n";
+            } else {
+                std::cerr << "[Cursor] GetCursorPos failed\n";
+            }
+            Sleep(cursorIntervalMs);
+        }
+        return 0;
     }
 
     std::shared_ptr<IProcessMemoryReader> reader;
