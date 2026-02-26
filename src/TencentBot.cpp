@@ -22,6 +22,7 @@
 #include <functional>
 #include <iostream>
 #include <map>
+#include <sstream>
 #include <stdexcept>
 #include <tlhelp32.h>
 #include <opencv2/core/mat.hpp>
@@ -89,6 +90,67 @@ namespace {
         if (isStopRequested(flag)) throwStop();
     }
     [[noreturn]] void throwGoalReached() { throw GoalReachedException{}; }
+
+    bool verifyIbMouseRelativeMove(std::string* reason) {
+        POINT before{};
+        if (!GetCursorPos(&before)) {
+            if (reason) *reason = "GetCursorPos(before) failed";
+            return false;
+        }
+
+        const int screenW = GetSystemMetrics(SM_CXSCREEN);
+        const int screenH = GetSystemMetrics(SM_CYSCREEN);
+        if (screenW <= 0 || screenH <= 0) {
+            if (reason) *reason = "GetSystemMetrics returned invalid screen size";
+            return false;
+        }
+
+        int dx = (before.x <= screenW - 80) ? 40 : -40;
+        int dy = (before.y <= screenH - 80) ? 28 : -28;
+        if (dx == 0) dx = 40;
+        if (dy == 0) dy = 28;
+
+        if (!IbSendMouseMove(static_cast<uint32_t>(dx), static_cast<uint32_t>(dy), Send::MoveMode::Relative)) {
+            if (reason) *reason = "IbSendMouseMove(relative test move) failed";
+            return false;
+        }
+
+        Sleep(40);
+
+        POINT after{};
+        if (!GetCursorPos(&after)) {
+            if (reason) *reason = "GetCursorPos(after) failed";
+            return false;
+        }
+
+        const int movedX = after.x - before.x;
+        const int movedY = after.y - before.y;
+
+        const bool signXOk = (dx == 0) || (movedX == 0 ? false : ((movedX > 0) == (dx > 0)));
+        const bool signYOk = (dy == 0) || (movedY == 0 ? false : ((movedY > 0) == (dy > 0)));
+        const bool magXOk = std::abs(movedX) >= std::max(6, std::abs(dx) / 2);
+        const bool magYOk = std::abs(movedY) >= std::max(6, std::abs(dy) / 2);
+        const bool ok = signXOk && signYOk && magXOk && magYOk;
+
+        // 回到原位置，避免影响后续点击逻辑。
+        if (movedX != 0 || movedY != 0) {
+            IbSendMouseMove(
+                static_cast<uint32_t>(-movedX),
+                static_cast<uint32_t>(-movedY),
+                Send::MoveMode::Relative
+            );
+            Sleep(20);
+        }
+
+        if (!ok && reason) {
+            std::ostringstream oss;
+            oss << "relative move mismatch"
+                << " expected=(" << dx << "," << dy << ")"
+                << " actual=(" << movedX << "," << movedY << ")";
+            *reason = oss.str();
+        }
+        return ok;
+    }
 }
 
 // =============================================================================
@@ -161,6 +223,13 @@ void TencentBot::init() {
         throw std::runtime_error("IbSendInit failed");
     }
     BOT_LOG("TencentBot", "鼠标模拟器初始化完成 (Logitech)");
+
+    std::string ibVerifyErr;
+    if (!verifyIbMouseRelativeMove(&ibVerifyErr)) {
+        BOT_ERR("TencentBot", "输入模拟器自检失败: " << ibVerifyErr);
+        throw std::runtime_error("IbInputSimulator movement verification failed");
+    }
+    BOT_LOG("TencentBot", "输入模拟器自检通过 (relative move)");
 
     // --- 4. 初始化 AI 验证码/文字识别引擎 ---
     aiCaptcha = std::make_unique<CaptchaEngine>("http://127.0.0.1:8000");
