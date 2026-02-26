@@ -37,7 +37,20 @@
 
 - `Selector`
   - `Sequence(goal_reached_condition -> return_and_submit_action)`
-  - `step_action`（按 checkpoint 推进一个步骤）
+  - `Selector(step_dispatch_branch)`
+    - `Sequence(is_step_0 -> run_leave_gang_to_difu)`
+    - `Sequence(is_step_1 -> run_difu_buy_paper)`
+    - `Sequence(is_step_2 -> run_travel_to_beiju)`
+    - `Sequence(is_step_3 -> run_beiju_sell_paper_buy_oil)`
+    - `Sequence(is_step_4 -> run_return_to_difu)`
+    - `Sequence(is_step_5 -> run_difu_sell_oil)`
+    - `Action(cycle_restart_if_needed)`
+
+说明：
+
+- 每个 `tick` 最多推进一个业务步骤，`next_op` 作为分发条件
+- `goal_branch` 优先级高于普通步骤分支（达标后立即回帮提交）
+- `cycle_restart_if_needed` 仅在 `next_op == steps.size()` 时触发新一轮 cycle
 
 收益：
 
@@ -75,6 +88,7 @@
 
 - 抽离 `RuntimeController` 为独立类（`src/runtime/`）[done]
 - 抽离行为树节点到独立模块（`src/bt/`）[done]
+- 跑商主循环改为显式 step 分发行为树（非单一 step_action）[done]
 - 命令协议升级为 JSON（带 request_id）[in progress: text protocol already supports request_id]
 - 增加集成测试（命令状态转换、checkpoint 恢复、异常恢复）
 - 增加故障注入测试（初始化失败、网络抖动、识别失败）

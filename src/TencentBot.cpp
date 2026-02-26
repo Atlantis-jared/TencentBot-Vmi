@@ -1412,10 +1412,15 @@ void TencentBot::runTradingRoute() {
     constexpr int kCycleRestartFromStep = 1;
 
     // --- 行为树版本主循环 ---
-    // 节点设计：
+    // 节点设计（显式分发）：
     // 1) goal_branch: 目标达成后执行“回帮派并提交”
-    // 2) step_branch: 正常执行当前 next_op
-    // 根节点使用 Selector，优先尝试 goal_branch，失败后走 step_branch。
+    // 2) step_dispatch_branch:
+    //    - 每个 step 都是一个 Sequence(Condition(next_op==i), Action(run_step_i))
+    //    - 所有 step Sequence 放入 Selector，实现“按 next_op 选择执行节点”
+    // 3) cycle_restart_if_needed:
+    //    - 当 next_op == steps.size() 时触发新一轮 cycle
+    //
+    // 根节点 route_root 仍使用 Selector，优先尝试 goal_branch，失败后走 step_dispatch_branch。
     auto btGoalCondition = [&]() -> bool {
         return ck.is_goal_reached;
     };
@@ -1430,30 +1435,11 @@ void TencentBot::runTradingRoute() {
         return bt::Status::Success;
     };
 
-    // 每次 tick 推进一个业务 step：
-    // - 读取 ck.next_op
-    // - 执行对应步骤
-    // - 持久化 checkpoint
-    // - 到末尾则进入下一轮 cycle
-    auto btStepAction = [&]() -> bt::Status {
-        if (steps.empty()) {
+    // 封装单步执行（供每个 step Action 节点复用）。
+    auto btRunStep = [&](int i) -> bt::Status {
+        if (i < 0 || i >= static_cast<int>(steps.size())) {
             return bt::Status::Failure;
         }
-
-        if (ck.next_op < 0) ck.next_op = 0;
-        if (ck.next_op > static_cast<int>(steps.size())) ck.next_op = static_cast<int>(steps.size());
-
-        if (ck.next_op >= static_cast<int>(steps.size())) {
-            // 一轮 step 执行完且未达标：进入下一轮（从 step1 开始）。
-            ck.cycle += 1;
-            ck.next_op = kCycleRestartFromStep;
-            ck.last_op_name = "cycle_restart";
-            (void)store.save(ck);
-            BOT_LOG("TencentBot", "未达标，继续下一轮 cycle=" << ck.cycle);
-            return bt::Status::Success;
-        }
-
-        const int i = ck.next_op;
         checkStop(stopSignal_);
         BOT_LOG("TencentBot", "=== step " << i << "/" << steps.size()
                 << " : " << steps[i].name << " (cycle=" << ck.cycle << ") ===");
@@ -1465,6 +1451,23 @@ void TencentBot::runTradingRoute() {
             ck.last_op_name = steps[i].name;
             (void)store.save(ck);
         }
+        return bt::Status::Success;
+    };
+
+    // 封装“轮次边界处理”：
+    // 只有当 next_op 已走到末尾时才返回 Success，否则返回 Failure 让 selector 继续其它分支。
+    auto btCycleRestartIfNeeded = [&]() -> bt::Status {
+        if (ck.next_op < 0) ck.next_op = 0;
+        if (ck.next_op > static_cast<int>(steps.size())) ck.next_op = static_cast<int>(steps.size());
+        if (ck.next_op < static_cast<int>(steps.size())) {
+            return bt::Status::Failure;
+        }
+
+        ck.cycle += 1;
+        ck.next_op = kCycleRestartFromStep;
+        ck.last_op_name = "cycle_restart";
+        (void)store.save(ck);
+        BOT_LOG("TencentBot", "未达标，继续下一轮 cycle=" << ck.cycle);
         return bt::Status::Success;
     };
 
@@ -1485,16 +1488,49 @@ void TencentBot::runTradingRoute() {
     goalChildren.emplace_back(std::make_unique<bt::Condition>("goal_reached?", btGoalCondition, btObserver));
     goalChildren.emplace_back(std::make_unique<bt::Action>("return_and_submit", btGoalAction, btObserver));
 
-    // 构建根节点：优先走 goal_branch，否则执行常规 step_branch。
+    // 构建 step 分发分支：
+    // 每个 step_i 均为 Sequence(判断 next_op, 执行 step)。
+    std::vector<std::unique_ptr<bt::Node>> dispatchChildren;
+    for (int i = 0; i < static_cast<int>(steps.size()); ++i) {
+        std::vector<std::unique_ptr<bt::Node>> gatedStepChildren;
+        gatedStepChildren.emplace_back(std::make_unique<bt::Condition>(
+            "is_step_" + std::to_string(i),
+            [&, i]() { return ck.next_op == i; },
+            btObserver
+        ));
+        gatedStepChildren.emplace_back(std::make_unique<bt::Action>(
+            "run_" + std::string(steps[i].name),
+            [&, i]() { return btRunStep(i); },
+            btObserver
+        ));
+        dispatchChildren.emplace_back(std::make_unique<bt::Sequence>(
+            "dispatch_step_" + std::to_string(i),
+            std::move(gatedStepChildren),
+            btObserver
+        ));
+    }
+    dispatchChildren.emplace_back(std::make_unique<bt::Action>(
+        "cycle_restart_if_needed",
+        btCycleRestartIfNeeded,
+        btObserver
+    ));
+
+    // 构建根节点：优先走 goal_branch，否则走 step_dispatch_branch。
     std::vector<std::unique_ptr<bt::Node>> rootChildren;
     rootChildren.emplace_back(std::make_unique<bt::Sequence>("goal_branch", std::move(goalChildren), btObserver));
-    rootChildren.emplace_back(std::make_unique<bt::Action>("step_branch", btStepAction, btObserver));
+    rootChildren.emplace_back(std::make_unique<bt::Selector>(
+        "step_dispatch_branch",
+        std::move(dispatchChildren),
+        btObserver
+    ));
     std::unique_ptr<bt::Node> root = std::make_unique<bt::Selector>("route_root", std::move(rootChildren), btObserver);
 
     try {
         // 主循环只负责 tick 行为树，不直接做业务分支判断。
         // 所有业务状态推进由节点动作内部完成。
         while (true) {
+            if (ck.next_op < 0) ck.next_op = 0;
+            if (ck.next_op > static_cast<int>(steps.size())) ck.next_op = static_cast<int>(steps.size());
             checkStop(stopSignal_);
             const bt::Status status = root->tick();
             if (status == bt::Status::Failure) {
