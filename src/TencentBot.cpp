@@ -2,8 +2,7 @@
 // TencentBot.cpp — 跑商机器人主类实现（Part 1: 初始化 + 底层操作 + 导航路线）
 // =============================================================================
 #include "TencentBot.h"
-#include "bt/BehaviorTree.h"
-#include "bt/StepDispatchTree.h"
+#include "domain/TradingRouteBehavior.h"
 #include "BotLogger.h"
 #include "CheckpointStore.h"
 
@@ -1428,18 +1427,18 @@ void TencentBot::runTradingRoute() {
 
     // 当银票达标后，该动作负责执行最终提交流程。
     // step6_returnAndSubmit 内部在成功时会抛 GoalReachedException 结束主循环。
-    auto btGoalAction = [&]() -> bt::Status {
+    auto btGoalAction = [&]() -> domain::TreeStatus {
         step6_returnAndSubmit();
         // 理论上若未抛异常，说明流程未真正收敛；短暂等待后让下一 tick 重试。
         BOT_WARN("TencentBot", "回帮步骤未完成，等待 5 秒后重试...");
         Sleep(5000);
-        return bt::Status::Success;
+        return domain::TreeStatus::Success;
     };
 
     // 封装单步执行（供每个 step Action 节点复用）。
-    auto btRunStep = [&](int i) -> bt::Status {
+    auto btRunStep = [&](int i) -> domain::TreeStatus {
         if (i < 0 || i >= static_cast<int>(steps.size())) {
-            return bt::Status::Failure;
+            return domain::TreeStatus::Failure;
         }
         checkStop(stopSignal_);
         BOT_LOG("TencentBot", "=== step " << i << "/" << steps.size()
@@ -1452,16 +1451,16 @@ void TencentBot::runTradingRoute() {
             ck.last_op_name = steps[i].name;
             (void)store.save(ck);
         }
-        return bt::Status::Success;
+        return domain::TreeStatus::Success;
     };
 
     // 封装“轮次边界处理”：
     // 只有当 next_op 已走到末尾时才返回 Success，否则返回 Failure 让 selector 继续其它分支。
-    auto btCycleRestartIfNeeded = [&]() -> bt::Status {
+    auto btCycleRestartIfNeeded = [&]() -> domain::TreeStatus {
         if (ck.next_op < 0) ck.next_op = 0;
         if (ck.next_op > static_cast<int>(steps.size())) ck.next_op = static_cast<int>(steps.size());
         if (ck.next_op < static_cast<int>(steps.size())) {
-            return bt::Status::Failure;
+            return domain::TreeStatus::Failure;
         }
 
         ck.cycle += 1;
@@ -1469,63 +1468,54 @@ void TencentBot::runTradingRoute() {
         ck.last_op_name = "cycle_restart";
         (void)store.save(ck);
         BOT_LOG("TencentBot", "未达标，继续下一轮 cycle=" << ck.cycle);
-        return bt::Status::Success;
+        return domain::TreeStatus::Success;
     };
 
     // 行为树节点状态观测：
     // 仅在状态变化时打日志，避免每 tick 刷屏。
-    std::map<std::string, bt::Status> btLastStatus;
-    auto btObserver = [&](std::string_view node, bt::Status status) {
+    std::map<std::string, domain::TreeStatus> btLastStatus;
+    auto btObserver = [&](std::string_view node, domain::TreeStatus status) {
         const std::string key(node);
         auto it = btLastStatus.find(key);
         if (it == btLastStatus.end() || it->second != status) {
             btLastStatus[key] = status;
-            BOT_LOG("BehaviorTree", "node=" << key << " status=" << bt::status_to_cstr(status));
+            BOT_LOG("BehaviorTree", "node=" << key << " status=" << domain::status_to_cstr(status));
         }
     };
 
-    // 构建 goal 分支：Condition + Action 的顺序节点。
-    std::vector<std::unique_ptr<bt::Node>> goalChildren;
-    goalChildren.emplace_back(std::make_unique<bt::Condition>("goal_reached?", btGoalCondition, btObserver));
-    goalChildren.emplace_back(std::make_unique<bt::Action>("return_and_submit", btGoalAction, btObserver));
-
-    // 构建 step 分发分支（由 bt::BuildStepDispatchTree 统一生成）：
-    // 每个 step_i 节点为 Sequence(is_step_i, run_step_i)。
-    std::vector<bt::StepDispatchItem> dispatchItems;
-    dispatchItems.reserve(steps.size());
+    // 将步骤执行器映射为 domain 层可消费的抽象节点定义。
+    std::vector<domain::TradingStepNode> stepNodes;
+    stepNodes.reserve(steps.size());
     for (int i = 0; i < static_cast<int>(steps.size()); ++i) {
-        dispatchItems.push_back(bt::StepDispatchItem{
+        stepNodes.push_back(domain::TradingStepNode{
             std::string(steps[i].name),
             [&, i]() { return btRunStep(i); }
         });
     }
-    std::unique_ptr<bt::Node> stepDispatchTree = bt::BuildStepDispatchTree(
-        "step_dispatch_branch",
-        std::move(dispatchItems),
-        [&]() { return ck.next_op; },
-        btCycleRestartIfNeeded,
-        btObserver
-    );
 
-    // 构建根节点：优先走 goal_branch，否则走 step_dispatch_branch。
-    std::vector<std::unique_ptr<bt::Node>> rootChildren;
-    rootChildren.emplace_back(std::make_unique<bt::Sequence>("goal_branch", std::move(goalChildren), btObserver));
-    rootChildren.emplace_back(std::move(stepDispatchTree));
-    std::unique_ptr<bt::Node> root = std::make_unique<bt::Selector>("route_root", std::move(rootChildren), btObserver);
+    domain::TradingTreeBuildContext treeCtx{};
+    treeCtx.is_goal_reached = btGoalCondition;
+    treeCtx.run_goal_action = btGoalAction;
+    treeCtx.steps = std::move(stepNodes);
+    treeCtx.current_step_index = [&]() { return ck.next_op; };
+    treeCtx.cycle_restart_if_needed = btCycleRestartIfNeeded;
+    treeCtx.observer = btObserver;
+
+    domain::TradingRouteBehavior behavior(std::move(treeCtx));
 
     try {
-        // 主循环只负责 tick 行为树，不直接做业务分支判断。
-        // 所有业务状态推进由节点动作内部完成。
-        while (true) {
-            if (ck.next_op < 0) ck.next_op = 0;
-            if (ck.next_op > static_cast<int>(steps.size())) ck.next_op = static_cast<int>(steps.size());
-            checkStop(stopSignal_);
-            const bt::Status status = root->tick();
-            if (status == bt::Status::Failure) {
+        domain::RunTradingRouteTreeLoop(
+            behavior,
+            [&]() {
+                if (ck.next_op < 0) ck.next_op = 0;
+                if (ck.next_op > static_cast<int>(steps.size())) ck.next_op = static_cast<int>(steps.size());
+                checkStop(stopSignal_);
+            },
+            [&]() {
                 BOT_WARN("TencentBot", "行为树 tick 失败，1 秒后重试");
                 Sleep(1000);
             }
-        }
+        );
     } catch (const StopRequestedException&) {
         // 收到停止信号时，保证 checkpoint 至少落盘一次。
         (void)store.save(ck);

@@ -29,6 +29,7 @@ add_executable(untitled
         src/MemoryReader.cpp
         src/bt/BehaviorTree.cpp
         src/bt/StepDispatchTree.cpp
+        src/domain/TradingRouteBehavior.cpp
         src/runtime/RuntimeController.cpp
 )
 

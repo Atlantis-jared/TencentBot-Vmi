@@ -13,6 +13,7 @@
 
 - 控制层不能直接调用底层细节（只通过 `TencentBot::init/runTradingRoute`）
 - 策略层不能直接访问网络层
+- 业务文件 `TencentBot.cpp` 不直接依赖 `src/bt/*`，统一通过 `src/domain/TradingRouteBehavior.*` 门面访问行为树
 
 ## 2. 生命周期状态机
 
