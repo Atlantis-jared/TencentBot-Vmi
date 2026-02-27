@@ -1,6 +1,6 @@
 # 梦幻西游跑商机器人
 
-基于 Host Rust memflow 内存数据面 + DXGI 屏幕截图 + OpenCV 模板匹配的全自动跑商工具。
+基于 Hypervisor 内存读取 + DXGI 屏幕截图 + OpenCV 模板匹配的全自动跑商工具。
 
 ---
 
@@ -39,28 +39,21 @@
 ## 项目结构
 
 ```
-├── main.cpp                  # 入口：参数解析 + 运行循环
+├── main.cpp                  # 入口：参数解析 + HV 初始化 + 运行循环
+├── hv.h / hv.asm             # Hypervisor 驱动接口（内存读写、进程查询）
+├── dumper.h / dumper.cpp      # 内存 dump 工具
 ├── src/
 │   ├── BotLogger.h            # 统一日志宏（BOT_LOG / BOT_WARN / BOT_ERR）
-│   ├── GameMemory.h / .cpp    # 内存读取层：SharedDataStatus 坐标读取/换算
+│   ├── GameMemory.h / .cpp    # 内存读取层：CR3 管理 + 角色坐标读取/换算
 │   ├── VisionEngine.h / .cpp  # 视觉引擎：截图 + 地图识别 + NPC 查找
-│   ├── TencentBot.h            # 主类声明
-│   ├── TencentBot.Core.cpp     # 初始化/生命周期
-│   ├── TencentBot.Motion.cpp   # 输入控制/寻路/传送
-│   ├── TencentBot.Routes.cpp   # 路线段与恢复路线
-│   ├── TencentBot.TradeOps.cpp # 交易读写与买卖流程
-│   ├── TencentBot.TradingRoute.cpp # 跑商行为树编排
-│   ├── TencentBot.Captcha.cpp  # 银票提交成语验证
+│   ├── TencentBot.h / .cpp    # 主调度器：路线导航 + 交易逻辑 + 跑商循环
 │   ├── DxgiWindowCapture.h/.cpp  # DXGI 屏幕截图
 │   ├── CaptchaEngine.h / .cpp # AI 文字/数字识别（HTTP 客户端 → 本地服务）
-│   ├── CheckpointStore.h/.cpp # JSON 断点存储
-│   ├── config/BotSettings.h/.cpp # 运行参数配置加载
-│   └── domain/MapProperties.h # 地图参数结构
+│   └── CheckpointStore.h/.cpp # JSON 断点存储
 ├── assets/
 │   ├── maps/                  # 地图识别模板（12 张 .png）
 │   ├── mapsui/                # 小地图 UI 模板（11 张，含昼夜变体）
-│   ├── npc/                   # NPC / 按钮 / 物品模板（20 张 .png）
-│   └── config/bot_settings.json # 可配置参数（时间/阈值/地图/启动参数）
+│   └── npc/                   # NPC / 按钮 / 物品模板（20 张 .png）
 ├── IbInputSimulator/          # 鼠标/键盘模拟器（Logitech 驱动）
 ├── CMakeLists.txt             # CMake 构建配置
 └── vcpkg.json                 # vcpkg 依赖清单
@@ -75,7 +68,7 @@
 ```
 ┌─────────────────────────────────────────┐
 │            main.cpp（入口）              │
-│   参数解析 / 信号处理                    │
+│   参数解析 / HV 初始化 / 信号处理        │
 └─────────────┬───────────────────────────┘
               │
 ┌─────────────▼───────────────────────────┐
@@ -86,8 +79,8 @@
 │ GameMemory  VisionEngine  CaptchaEngine │
 │ 内存读取     视觉识别       AI 识别      │
 │      │          │                       │
-│ SharedDataStatus  DxgiWindowCapture     │
-│ Host 数据面写入   DXGI 截图             │
+│   hv.h    DxgiWindowCapture             │
+│  HV 驱动    DXGI 截图                   │
 └─────────────────────────────────────────┘
 ```
 
@@ -107,11 +100,11 @@ BOT_ERR("Module", "错误内容");                // [ERROR] 错误信息
 
 #### GameMemory（`GameMemory.h/.cpp`）
 
-封装 SharedDataStatus 数据面读取和游戏坐标系统：
+封装 Hypervisor 内存访问和游戏坐标系统：
 
-- **`readPitPosRaw(processIndex)`** — 读取角色原始像素坐标（共享结构体）
+- **`readPitPosRaw(processIndex)`** — 读取角色原始像素坐标（二级指针解引用）
 - **`readRoleGameCoord(processIndex, mapName)`** — 将原始坐标换算为游戏世界坐标
-- 持有多进程 PID 列表并在初始化阶段完成 `INIT_BIND`
+- 持有多进程的 PID / CR3 / DLL 基地址数组（支持多开）
 
 坐标换算公式：
 ```
@@ -130,7 +123,7 @@ GameCoord.y = (kMapYBase[mapName] - rawY) / 20
 
 模板文件在编译后自动复制到输出目录（`maps/`、`npcs/`、`mapsui/`）。
 
-#### TencentBot（`TencentBot.*.cpp`）
+#### TencentBot（`TencentBot.h/.cpp`）
 
 高层调度器，不直接接触底层 API：
 
@@ -185,6 +178,7 @@ JSON 文件持久化，支持断点续跑：
 - Windows 10/11（SDK ≥ 10.0.19041.0）
 - Visual Studio 2022（MSVC v143，支持 C++20）
 - vcpkg（集成模式）
+- 自定义 Hypervisor 驱动已加载
 
 ### 编译步骤
 
@@ -205,7 +199,6 @@ cmake --build build --config Release
 - `untitled.exe` — 主程序
 - `IbInputSimulator.dll` — 输入模拟器
 - `maps/`、`npcs/`、`mapsui/` — 模板图片（自动复制）
-- `config/bot_settings.json` — 运行配置文件（自动复制）
 
 ---
 
@@ -213,45 +206,12 @@ cmake --build build --config Release
 
 ### 前提条件
 
-1. 游戏进程 `mhmain.exe` 和 `mhtab.exe` 正在运行
-2. Host 侧内存后端已启动（推荐 C++ 后端，监听 `4050`）
+1. Hypervisor 驱动已加载（`hv::is_hv_running()` 返回 true）
+2. 游戏进程 `mhmain.exe` 和 `mhtab.exe` 正在运行
 3. AI 识别服务运行在 `http://127.0.0.1:8000`
 4. 屏幕分辨率 2560×1440（逻辑分辨率）
 
-### 启动内存后端（推荐）
-
-```bash
-# Host: C++ 后端（推荐）
-cd /root/workspace/TencentBot-vmi-mem-backend-cpp
-cmake --preset linux-release
-cmake --build --preset build-release
-./build/release/tencentbot_mem_backend --transport vsock --listen-cid 2 --listen-port 4050 --admin-host 127.0.0.1 --admin-port 4051 --backend command --log-file /tmp/tencentbot_mem_backend.log --tool /root/workspace/TencentBot-vmi-memflow-rs/run_memflow_tool.sh
-```
-
-可先用下列命令验证 Host 已经能读取真实 VM 进程信息：
-
-```bash
-/root/workspace/TencentBot-vmi-memflow-rs/run_memflow_tool.sh list-procs --limit 20 --filter mh
-```
-
 ### 基本用法
-
-启动参数默认从 `config/bot_settings.json` 的 `runtime` 段读取：
-
-```json
-"runtime": {
-  "checkpoint_path": "bot_checkpoint.json",
-  "mem_backend": "vsock",
-  "vsock_cid": 2,
-  "vsock_port": 4050,
-  "vsock_timeout_ms": 5000,
-  "remote_port": 19090,
-  "cursor_interval_ms": 100,
-  "log_cursor_during_run": true
-}
-```
-
-因此正常启动只需要：
 
 ```powershell
 # 正常运行（默认目标 150000 银票）
@@ -271,9 +231,6 @@ cmake --build --preset build-release
 
 # 指定 checkpoint 文件路径
 .\untitled.exe --checkpoint mybot.json
-
-# 如需临时覆盖配置（优先级高于 runtime）
-.\untitled.exe --mem-backend vsock --cid 2 --port 4050 --vsock-timeout-ms 5000
 ```
 
 ### 安全停止
@@ -297,7 +254,7 @@ cmake --build --preset build-release
 
 1. 截取地图特征区域，保存为 `assets/maps/地图名.png`
 2. 截取小地图 UI，保存为 `assets/mapsui/地图名.png`（如有夜间版另存 `地图名1.png`）
-3. 在 `assets/config/bot_settings.json` 的 `map_properties` 中添加条目：
+3. 在 `TencentBot.cpp` 的 `MAP_PROPERTIES` 中添加条目：
    ```cpp
    {"地图名", {UI宽度, UI高度, 游戏坐标X最大值, 游戏坐标Y最大值}},
    ```
