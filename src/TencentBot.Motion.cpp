@@ -2,6 +2,7 @@
 
 #include "config/BotSettings.h"
 #include "domain/RunControl.h"
+#include "SharedDataStatus.h"
 
 #ifdef min
 #undef min
