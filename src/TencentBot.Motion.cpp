@@ -50,15 +50,19 @@ constexpr int ARRIVAL_RADIUS = 4;
 
 void TencentBot::moveCharacterTo(int targetX, int targetY, int processIndex) {
     using namespace MouseCurve;
-    (void)processIndex; // 不再需要读游戏坐标，改用系统光标位置
+    (void)processIndex; 
 
-    POINT cursorPt{};
-    if (!GetCursorPos(&cursorPt)) {
-        BOT_WARN("TencentBot", "moveCharacterTo: GetCursorPos(start) failed");
+    auto snap = read_shared_data_snapshot();
+    if (snap.sync_flag != 1) {
+        BOT_WARN("TencentBot", "moveCharacterTo: SharedDataStatus not ready (sync_flag=" << snap.sync_flag << ")");
+        // 发送无关紧要的极小移动刺激游戏刷新状态
+        IbSendMouseMove(1, 1, Send::MoveMode::Relative);
+        IbSendMouseMove(-1, -1, Send::MoveMode::Relative);
         return;
     }
-    double startX = static_cast<double>(cursorPt.x);
-    double startY = static_cast<double>(cursorPt.y);
+
+    double startX = static_cast<double>(snap.pit_x);
+    double startY = static_cast<double>(snap.pit_y);
 
     double deltaX = targetX - startX;
     double deltaY = targetY - startY;
@@ -115,12 +119,12 @@ void TencentBot::moveCharacterTo(int targetX, int targetY, int processIndex) {
     double errorAccumX = 0.0;
     double errorAccumY = 0.0;
     for (int step = 1; step <= curveSteps; ++step) {
-        POINT nowPt{};
-        if (!GetCursorPos(&nowPt)) {
+        auto nowSnap = read_shared_data_snapshot();
+        if (nowSnap.sync_flag != 1) {
             break;
         }
-        double curX = static_cast<double>(nowPt.x);
-        double curY = static_cast<double>(nowPt.y);
+        double curX = static_cast<double>(nowSnap.pit_x);
+        double curY = static_cast<double>(nowSnap.pit_y);
         if (std::hypot(overshootX - curX, overshootY - curY) < 1.0) {
             break;
         }
@@ -152,12 +156,12 @@ void TencentBot::moveCharacterTo(int targetX, int targetY, int processIndex) {
     int noImprovementCount = 0;
 
     for (int iter = 0; iter < PULLBACK_MAX_ITERS; ++iter) {
-        POINT finalPt{};
-        if (!GetCursorPos(&finalPt)) {
+        auto finalSnap = read_shared_data_snapshot();
+        if (finalSnap.sync_flag != 1) {
             break;
         }
-        double curX = static_cast<double>(finalPt.x);
-        double curY = static_cast<double>(finalPt.y);
+        double curX = static_cast<double>(finalSnap.pit_x);
+        double curY = static_cast<double>(finalSnap.pit_y);
         double diffX = targetX - curX;
         double diffY = targetY - curY;
         double distToTarget = std::hypot(diffX, diffY);
