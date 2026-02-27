@@ -50,10 +50,15 @@ constexpr int ARRIVAL_RADIUS = 4;
 
 void TencentBot::moveCharacterTo(int targetX, int targetY, int processIndex) {
     using namespace MouseCurve;
+    (void)processIndex; // 不再需要读游戏坐标，改用系统光标位置
 
-    RawCoord currentRaw = gameMemory.readPitPosRaw(static_cast<uint32_t>(processIndex));
-    double startX = static_cast<double>(currentRaw.x);
-    double startY = static_cast<double>(currentRaw.y);
+    POINT cursorPt{};
+    if (!GetCursorPos(&cursorPt)) {
+        BOT_WARN("TencentBot", "moveCharacterTo: GetCursorPos(start) failed");
+        return;
+    }
+    double startX = static_cast<double>(cursorPt.x);
+    double startY = static_cast<double>(cursorPt.y);
 
     double deltaX = targetX - startX;
     double deltaY = targetY - startY;
@@ -110,9 +115,12 @@ void TencentBot::moveCharacterTo(int targetX, int targetY, int processIndex) {
     double errorAccumX = 0.0;
     double errorAccumY = 0.0;
     for (int step = 1; step <= curveSteps; ++step) {
-        RawCoord nowRaw = gameMemory.readPitPosRaw(static_cast<uint32_t>(processIndex));
-        double curX = static_cast<double>(nowRaw.x);
-        double curY = static_cast<double>(nowRaw.y);
+        POINT nowPt{};
+        if (!GetCursorPos(&nowPt)) {
+            break;
+        }
+        double curX = static_cast<double>(nowPt.x);
+        double curY = static_cast<double>(nowPt.y);
         if (std::hypot(overshootX - curX, overshootY - curY) < 1.0) {
             break;
         }
@@ -144,9 +152,12 @@ void TencentBot::moveCharacterTo(int targetX, int targetY, int processIndex) {
     int noImprovementCount = 0;
 
     for (int iter = 0; iter < PULLBACK_MAX_ITERS; ++iter) {
-        RawCoord finalRaw = gameMemory.readPitPosRaw(static_cast<uint32_t>(processIndex));
-        double curX = static_cast<double>(finalRaw.x);
-        double curY = static_cast<double>(finalRaw.y);
+        POINT finalPt{};
+        if (!GetCursorPos(&finalPt)) {
+            break;
+        }
+        double curX = static_cast<double>(finalPt.x);
+        double curY = static_cast<double>(finalPt.y);
         double diffX = targetX - curX;
         double diffY = targetY - curY;
         double distToTarget = std::hypot(diffX, diffY);
