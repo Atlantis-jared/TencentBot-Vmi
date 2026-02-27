@@ -60,6 +60,43 @@ void load_trade_threshold(const json& j, BotSettings* out) {
         j.value("oil_sell_profit_ratio", out->trade_threshold.oil_sell_profit_ratio);
 }
 
+void load_runtime(const json& j, BotSettings* out) {
+    if (!out || !j.is_object()) return;
+
+    const std::string checkpoint_path = j.value("checkpoint_path", out->runtime.checkpoint_path);
+    if (!checkpoint_path.empty()) {
+        out->runtime.checkpoint_path = checkpoint_path;
+    }
+
+    const std::string mem_backend = j.value("mem_backend", out->runtime.mem_backend);
+    if (mem_backend == "vsock") {
+        out->runtime.mem_backend = mem_backend;
+    }
+
+    const auto vsock_cid = j.value("vsock_cid", out->runtime.vsock_cid);
+    out->runtime.vsock_cid = vsock_cid;
+
+    const auto vsock_port = j.value("vsock_port", out->runtime.vsock_port);
+    if (vsock_port > 0 && vsock_port <= 65535) {
+        out->runtime.vsock_port = vsock_port;
+    }
+
+    const auto vsock_timeout_ms = j.value("vsock_timeout_ms", out->runtime.vsock_timeout_ms);
+    if (vsock_timeout_ms > 0) {
+        out->runtime.vsock_timeout_ms = vsock_timeout_ms;
+    }
+
+    const auto remote_port = j.value("remote_port", out->runtime.remote_port);
+    if (remote_port > 0 && remote_port <= 65535) {
+        out->runtime.remote_port = remote_port;
+    }
+
+    const auto cursor_interval_ms = j.value("cursor_interval_ms", out->runtime.cursor_interval_ms);
+    if (cursor_interval_ms > 0) {
+        out->runtime.cursor_interval_ms = cursor_interval_ms;
+    }
+}
+
 void load_map_properties(const json& j, BotSettings* out) {
     if (!out || !j.is_object()) return;
     for (auto it = j.begin(); it != j.end(); ++it) {
@@ -96,6 +133,7 @@ BotSettings load_from_file(const std::filesystem::path& path) {
         load_timing(root.value("timing", json::object()), &settings);
         load_window_offset(root.value("window_offset", json::object()), &settings);
         load_trade_threshold(root.value("trade_threshold", json::object()), &settings);
+        load_runtime(root.value("runtime", json::object()), &settings);
         load_map_properties(root.value("map_properties", json::object()), &settings);
         BOT_LOG("BotConfig", "配置加载成功: " << path.string());
     } catch (const std::exception& e) {

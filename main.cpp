@@ -21,6 +21,7 @@
 #include "src/MemoryReader.h"
 #include "src/SharedDataStatus.h"
 #include "src/runtime/RuntimeController.h"
+#include "src/config/BotSettings.h"
 
 TencentBot bot;
 // 全局停止标志：
@@ -50,7 +51,10 @@ namespace {
     void printCheckpointHelp() {
         std::cout <<
 R"(Checkpoint tools:
-  --checkpoint <path>         checkpoint 文件路径（默认 bot_checkpoint.json）
+  启动参数默认来自 config/bot_settings.json 的 runtime 段
+  （mem-backend / cid / port / vsock-timeout-ms / remote-port 等）。
+
+  --checkpoint <path>         checkpoint 文件路径（默认 runtime.checkpoint_path）
   --show-checkpoint           打印当前 checkpoint 并退出
   --reset-checkpoint          删除 checkpoint（下次从头开始）并退出
   --set-next-op <n>           设置 next_op 并退出
@@ -60,7 +64,7 @@ R"(Checkpoint tools:
   --cursor-interval-ms <n>    鼠标坐标打印间隔毫秒（默认 100）
   --pid <n>                   print-cursor 模式下用于读内存链的目标 PID
   --remote-control            开启远程控制模式（通过 TCP 指令启停）
-  --remote-port <n>           远程控制监听端口（默认 19090）
+  --remote-port <n>           远程控制监听端口（默认 runtime.remote_port）
 
 next_op 对应关系（v3）:
   0: leave_gang_to_difu        出帮派 -> 长安 -> 大唐国境 -> 地府
@@ -117,17 +121,20 @@ int main(int argc, char** argv) {
     // 1) 该阶段不触发任何外部依赖（不连 vsock，不初始化 bot）
     // 2) checkpoint 工具类参数可“只读/只改后立即退出”
     // 3) --print-cursor 属于独立调试模式，也会提前退出
-    std::string checkpointPath = "bot_checkpoint.json";
+    // 启动参数默认来自配置文件 runtime 段。
+    // 命令行参数若传入则覆盖这里的默认值。
+    const config::BotSettings& startupConfig = config::GetBotSettings();
+    std::string checkpointPath = startupConfig.runtime.checkpoint_path;
     bool showCk = false;
     bool resetCk = false;
     bool setSomething = false;
     bool printCursor = false;
-    std::string memBackend = "vsock";
-    uint32_t vsockCid = 2;
-    uint32_t vsockPort = 4050;
-    uint32_t vsockTimeoutMs = 5000;
-    uint32_t cursorIntervalMs = 100;
-    uint32_t remotePort = 19090;
+    std::string memBackend = startupConfig.runtime.mem_backend;
+    uint32_t vsockCid = startupConfig.runtime.vsock_cid;
+    uint32_t vsockPort = startupConfig.runtime.vsock_port;
+    uint32_t vsockTimeoutMs = startupConfig.runtime.vsock_timeout_ms;
+    uint32_t cursorIntervalMs = startupConfig.runtime.cursor_interval_ms;
+    uint32_t remotePort = startupConfig.runtime.remote_port;
     uint64_t debugPid = 0;
     TradingCheckpoint forced{};
     bool forceNextOp = false, forceCycle = false, forceTarget = false;

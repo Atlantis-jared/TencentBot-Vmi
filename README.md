@@ -60,7 +60,7 @@
 │   ├── maps/                  # 地图识别模板（12 张 .png）
 │   ├── mapsui/                # 小地图 UI 模板（11 张，含昼夜变体）
 │   ├── npc/                   # NPC / 按钮 / 物品模板（20 张 .png）
-│   └── config/bot_settings.json # 可配置参数（时间/阈值/地图参数）
+│   └── config/bot_settings.json # 可配置参数（时间/阈值/地图/启动参数）
 ├── IbInputSimulator/          # 鼠标/键盘模拟器（Logitech 驱动）
 ├── CMakeLists.txt             # CMake 构建配置
 └── vcpkg.json                 # vcpkg 依赖清单
@@ -236,6 +236,22 @@ cmake --build --preset build-release
 
 ### 基本用法
 
+启动参数默认从 `config/bot_settings.json` 的 `runtime` 段读取：
+
+```json
+"runtime": {
+  "checkpoint_path": "bot_checkpoint.json",
+  "mem_backend": "vsock",
+  "vsock_cid": 2,
+  "vsock_port": 4050,
+  "vsock_timeout_ms": 5000,
+  "remote_port": 19090,
+  "cursor_interval_ms": 100
+}
+```
+
+因此正常启动只需要：
+
 ```powershell
 # 正常运行（默认目标 150000 银票）
 .\untitled.exe
@@ -255,7 +271,7 @@ cmake --build --preset build-release
 # 指定 checkpoint 文件路径
 .\untitled.exe --checkpoint mybot.json
 
-# 使用 vsock INIT_BIND（连接 Host 独立内存后端）
+# 如需临时覆盖配置（优先级高于 runtime）
 .\untitled.exe --mem-backend vsock --cid 2 --port 4050 --vsock-timeout-ms 5000
 ```
 

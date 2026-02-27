@@ -16,6 +16,15 @@
     "paper_sell_profit_ratio": 1.5,
     "oil_sell_profit_ratio": 1.5
   },
+  "runtime": {
+    "checkpoint_path": "bot_checkpoint.json",
+    "mem_backend": "vsock",
+    "vsock_cid": 2,
+    "vsock_port": 4050,
+    "vsock_timeout_ms": 5000,
+    "remote_port": 19090,
+    "cursor_interval_ms": 100
+  },
   "map_properties": {
     "jianyecheng": { "uiPixelWidth": 556, "uiPixelHeight": 277, "gameCoordMaxX": 288, "gameCoordMaxY": 144 },
     "donghaiwan": { "uiPixelWidth": 276, "uiPixelHeight": 276, "gameCoordMaxX": 119, "gameCoordMaxY": 119 },
@@ -30,4 +39,3 @@
     "beijuluzhou": { "uiPixelWidth": 367, "uiPixelHeight": 276, "gameCoordMaxX": 227, "gameCoordMaxY": 169 }
   }
 }
-
