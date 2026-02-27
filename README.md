@@ -246,7 +246,8 @@ cmake --build --preset build-release
   "vsock_port": 4050,
   "vsock_timeout_ms": 5000,
   "remote_port": 19090,
-  "cursor_interval_ms": 100
+  "cursor_interval_ms": 100,
+  "log_cursor_during_run": true
 }
 ```
 

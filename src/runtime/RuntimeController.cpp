@@ -6,6 +6,7 @@
 #endif
 
 #include "RuntimeController.h"
+#include "../BotLogger.h"
 
 #include <winsock2.h>
 #include <ws2tcpip.h>
@@ -100,6 +101,7 @@ void log_event(
     RuntimeState state,
     const std::string& message
 ) {
+    std::lock_guard<std::mutex> lk(BotLogger::outputMutex());
     std::cout << "{\"ts\":\"" << now_text()
               << "\",\"module\":\"RuntimeController\""
               << ",\"event\":\"" << json_escape(event ? event : "")
@@ -108,6 +110,7 @@ void log_event(
               << "\",\"state\":\"" << state_to_text(state)
               << "\",\"message\":\"" << json_escape(message)
               << "\"}\n";
+    std::cout.flush();
 }
 
 // 去除命令首尾空白。
@@ -216,6 +219,7 @@ RuntimeController::RuntimeController(ServerOptions options, InitFn init_fn, RunF
 int RuntimeController::RunBlocking() {
     // 回调检查：这 3 个回调是控制器与业务层解耦的关键接口。
     if (!init_fn_ || !run_fn_ || !stop_fn_) {
+        std::lock_guard<std::mutex> lk(BotLogger::outputMutex());
         std::cerr << "[RuntimeController] invalid callbacks\n";
         return 2;
     }
@@ -223,6 +227,7 @@ int RuntimeController::RunBlocking() {
     // 网络子系统初始化。
     WsaInitGuard wsa;
     if (!wsa.ok()) {
+        std::lock_guard<std::mutex> lk(BotLogger::outputMutex());
         std::cerr << "[RuntimeController] WSAStartup failed\n";
         return 2;
     }
@@ -230,6 +235,7 @@ int RuntimeController::RunBlocking() {
     // 创建监听 socket。
     SOCKET listen_sock = socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
     if (listen_sock == INVALID_SOCKET) {
+        std::lock_guard<std::mutex> lk(BotLogger::outputMutex());
         std::cerr << "[RuntimeController] socket create failed\n";
         return 2;
     }
@@ -248,11 +254,13 @@ int RuntimeController::RunBlocking() {
     addr.sin_port = htons(static_cast<u_short>(options_.port));
     addr.sin_addr.s_addr = htonl(INADDR_ANY);
     if (bind(listen_sock, reinterpret_cast<sockaddr*>(&addr), sizeof(addr)) == SOCKET_ERROR) {
+        std::lock_guard<std::mutex> lk(BotLogger::outputMutex());
         std::cerr << "[RuntimeController] bind port " << options_.port << " failed\n";
         close_sock(listen_sock);
         return 2;
     }
     if (listen(listen_sock, 8) == SOCKET_ERROR) {
+        std::lock_guard<std::mutex> lk(BotLogger::outputMutex());
         std::cerr << "[RuntimeController] listen failed\n";
         close_sock(listen_sock);
         return 2;
@@ -356,9 +364,14 @@ int RuntimeController::RunBlocking() {
     });
 
     // 启动提示。
-    std::cout << "[Bot] 远程控制已开启，监听 0.0.0.0:" << options_.port << "\n";
-    std::cout << "[Bot] 当前状态: NOT_INITIALIZED（等待 INIT）\n";
-    std::cout << "[Bot] 指令: INIT / START / STOP / STATUS / QUIT\n";
+    {
+        // 启动提示与业务日志共享同一输出锁，防止与其他线程互相穿插。
+        std::lock_guard<std::mutex> lk(BotLogger::outputMutex());
+        std::cout << "[Bot] 远程控制已开启，监听 0.0.0.0:" << options_.port << "\n";
+        std::cout << "[Bot] 当前状态: NOT_INITIALIZED（等待 INIT）\n";
+        std::cout << "[Bot] 指令: INIT / START / STOP / STATUS / QUIT\n";
+        std::cout.flush();
+    }
 
     // 网络线程：接收命令并快速返回，不做重业务执行。
     while (!server_quit) {

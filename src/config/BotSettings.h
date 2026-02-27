@@ -38,6 +38,7 @@ struct RuntimeSettings {
     std::uint32_t vsock_timeout_ms = 5000;
     std::uint32_t remote_port = 19090;
     std::uint32_t cursor_interval_ms = 100;
+    bool log_cursor_during_run = true;
 };
 
 struct BotSettings {

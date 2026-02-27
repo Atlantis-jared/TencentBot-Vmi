@@ -11,7 +11,7 @@ CaptchaEngine::CaptchaEngine(const std::string& serverUrl) : baseUrl(serverUrl) 
     SetConsoleOutputCP(CP_UTF8);
 #endif
     curl_global_init(CURL_GLOBAL_ALL);
-    std::cout << "[Captcha] 就绪 Server=" << baseUrl << "\n";
+    CE_LOG("就绪 Server=" << baseUrl);
 }
 
 CaptchaEngine::~CaptchaEngine() {

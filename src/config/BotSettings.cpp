@@ -95,6 +95,9 @@ void load_runtime(const json& j, BotSettings* out) {
     if (cursor_interval_ms > 0) {
         out->runtime.cursor_interval_ms = cursor_interval_ms;
     }
+
+    out->runtime.log_cursor_during_run =
+        j.value("log_cursor_during_run", out->runtime.log_cursor_during_run);
 }
 
 void load_map_properties(const json& j, BotSettings* out) {

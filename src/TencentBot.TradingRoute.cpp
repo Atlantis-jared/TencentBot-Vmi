@@ -1,6 +1,7 @@
 #include "TencentBot.h"
 
 #include "CheckpointStore.h"
+#include "SharedDataStatus.h"
 #include "config/BotSettings.h"
 #include "domain/RunControl.h"
 #include "domain/TradingRouteBehavior.h"
@@ -8,11 +9,14 @@
 
 #include <windows.h>
 
+#include <atomic>
+#include <algorithm>
 #include <chrono>
 #include <functional>
 #include <map>
 #include <memory>
 #include <string>
+#include <thread>
 #include <vector>
 
 namespace {
@@ -25,10 +29,71 @@ const config::TradeThresholdSettings& threshold() {
     return config::GetBotSettings().trade_threshold;
 }
 
+// 运行期光标追踪线程：
+// - 输出系统鼠标坐标
+// - 同时输出 Host 回写的 SharedDataStatus 坐标，便于定位“鼠标乱飞/坐标错位”。
+class CursorTraceRunner {
+public:
+    CursorTraceRunner(const std::atomic_bool* stop_signal, int interval_ms)
+        : stop_signal_(stop_signal),
+          interval_ms_(std::max(20, interval_ms)),
+          worker_([this]() { run_loop(); }) {}
+
+    ~CursorTraceRunner() {
+        stop_.store(true, std::memory_order_relaxed);
+        if (worker_.joinable()) {
+            worker_.join();
+        }
+    }
+
+private:
+    void run_loop() {
+        while (!stop_.load(std::memory_order_relaxed) &&
+               !domain::is_stop_requested(stop_signal_)) {
+            POINT pt{};
+            if (GetCursorPos(&pt)) {
+                const SharedDataSnapshot snap = read_shared_data_snapshot();
+                BOT_LOG("CursorTrace",
+                    "cursor=(" << pt.x << "," << pt.y << ")"
+                    << " sync=" << snap.sync_flag
+                    << " ts=" << snap.timestamp
+                    << " game=(" << snap.current_x << "," << snap.current_y << ")"
+                    << " map=" << snap.map_id);
+            } else {
+                BOT_WARN("CursorTrace", "GetCursorPos failed");
+            }
+
+            int slept = 0;
+            while (slept < interval_ms_ &&
+                   !stop_.load(std::memory_order_relaxed) &&
+                   !domain::is_stop_requested(stop_signal_)) {
+                constexpr int kSliceMs = 20;
+                const int chunk = std::min(kSliceMs, interval_ms_ - slept);
+                std::this_thread::sleep_for(std::chrono::milliseconds(chunk));
+                slept += chunk;
+            }
+        }
+    }
+
+    const std::atomic_bool* stop_signal_ = nullptr;
+    int interval_ms_ = 100;
+    std::atomic_bool stop_{false};
+    std::thread worker_;
+};
+
 } // namespace
 
 void TencentBot::runTradingRoute() {
     BOT_LOG("TencentBot", "========== 跑商开始 ==========");
+
+    const auto& runtime = config::GetBotSettings().runtime;
+    [[maybe_unused]] std::unique_ptr<CursorTraceRunner> cursor_trace;
+    if (runtime.log_cursor_during_run) {
+        BOT_LOG("TencentBot",
+            "运行期光标追踪已开启 interval_ms=" << runtime.cursor_interval_ms);
+        cursor_trace = std::make_unique<CursorTraceRunner>(
+            stopSignal_, static_cast<int>(runtime.cursor_interval_ms));
+    }
 
     // --- 加载断点 ---
     CheckpointStore store(checkpointFile_);
