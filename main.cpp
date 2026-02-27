@@ -312,8 +312,10 @@ int main(int argc, char** argv) {
                 std::cout << "[Cursor] x=" << pt.x << " y=" << pt.y
                           << " sync=" << snap.sync_flag
                           << " ts=" << snap.timestamp
-                          << " current_x=" << snap.current_x
-                          << " current_y=" << snap.current_y
+                          << " pit_x=" << snap.pit_x
+                          << " pit_y=" << snap.pit_y
+                          << " role_x=" << snap.role_raw_x
+                          << " role_y=" << snap.role_raw_y
                           << " map_id=" << snap.map_id
                           << "\n";
             } else {
