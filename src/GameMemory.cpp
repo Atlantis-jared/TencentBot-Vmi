@@ -50,14 +50,14 @@ RawCoord GameMemory::readPitPosRaw(uint32_t processIndex) const {
         BOT_WARN("GameMemory", "SharedDataStatus 未就绪，sync_flag=" << snap.sync_flag);
         return {};
     }
-    if (snap.current_x < 0 || snap.current_y < 0) {
-        BOT_WARN("GameMemory", "SharedDataStatus 坐标异常: x=" << snap.current_x << " y=" << snap.current_y);
+    if (snap.pit_x < 0 || snap.pit_y < 0) {
+        BOT_WARN("GameMemory", "SharedDataStatus 坑位坐标异常: x=" << snap.pit_x << " y=" << snap.pit_y);
         return {};
     }
 
     return RawCoord{
-        static_cast<std::uint32_t>(snap.current_x),
-        static_cast<std::uint32_t>(snap.current_y),
+        static_cast<std::uint32_t>(snap.pit_x),
+        static_cast<std::uint32_t>(snap.pit_y),
     };
 }
 
@@ -87,12 +87,13 @@ GameCoord GameMemory::readRoleGameCoord(uint32_t processIndex, const std::string
         return {};
     }
 
+    // 使用 role 偏移量 (0x208) 的原始值进行换算（与原项目 HV 读取逻辑一致）
     GameCoord result{};
-    result.x = (snap.current_x - 10) / 20;
+    result.x = (snap.role_raw_x - 10) / 20;
 
     auto yBaseIter = kMapYBase.find(currentMapName);
     if (yBaseIter != kMapYBase.end()) {
-        result.y = (yBaseIter->second - snap.current_y) / 20;
+        result.y = (yBaseIter->second - snap.role_raw_y) / 20;
     } else {
         BOT_WARN("GameMemory", "未知地图名「" << currentMapName << "」，无法换算 Y 坐标，返回 0");
         result.y = 0;

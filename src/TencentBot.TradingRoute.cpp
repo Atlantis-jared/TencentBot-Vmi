@@ -57,7 +57,8 @@ private:
                     "cursor=(" << pt.x << "," << pt.y << ")"
                     << " sync=" << snap.sync_flag
                     << " ts=" << snap.timestamp
-                    << " game=(" << snap.current_x << "," << snap.current_y << ")"
+                    << " pit=(" << snap.pit_x << "," << snap.pit_y << ")"
+                    << " role=(" << snap.role_raw_x << "," << snap.role_raw_y << ")"
                     << " map=" << snap.map_id);
             } else {
                 BOT_WARN("CursorTrace", "GetCursorPos failed");

@@ -349,6 +349,10 @@ bool VsockMemoryReader::init_bind_once(std::uint64_t target_pid, std::string* er
         << (GAME_PIT_POS_STRUCT_OFFSET + 4) << ","
         // 第 3 个偏移位预留 map_id；若目标结构无该字段，Host 可忽略或写 0。
         << (GAME_PIT_POS_STRUCT_OFFSET + 8)
+        << "],"
+        << "\"role_offsets\":["
+        << GAME_ROLE_POS_STRUCT_OFFSET << ","
+        << (GAME_ROLE_POS_STRUCT_OFFSET + 4)
         << "]"
         << "}}\n";
 
