@@ -1,33 +1,18 @@
-#ifndef NOMINMAX
-#define NOMINMAX
-#endif
-#ifndef WIN32_LEAN_AND_MEAN
-#define WIN32_LEAN_AND_MEAN
-#endif
-
 #include <iostream>
 #include <atomic>
-#include <memory>
 #include <thread>
 #include <string>
 #include <vector>
-#include <cstdint>
-#include <clocale>
 #include <windows.h>
+#include "hv.h"
 #include "src/CheckpointStore.h"
 #include "src/TencentBot.h"
 #include "src/DxgiWindowCapture.h"
 #include "src/CaptchaEngine.h"
-#include "src/MemoryReader.h"
-#include "src/SharedDataStatus.h"
-#include "src/runtime/RuntimeController.h"
-#include "src/config/BotSettings.h"
+#include "src/MemflowConnector.h"
 
 TencentBot bot;
-// 全局停止标志：
-// - 控制台 Ctrl+C 会置位
-// - 远程 STOP 指令会置位
-// - 业务线程在关键循环中轮询该标志并安全退出
+MemflowConnector memflow;
 static std::atomic_bool g_stopRequested{false};
 
 static BOOL WINAPI ConsoleCtrlHandler(DWORD ctrlType) {
@@ -38,33 +23,28 @@ static BOOL WINAPI ConsoleCtrlHandler(DWORD ctrlType) {
         case CTRL_LOGOFF_EVENT:
         case CTRL_SHUTDOWN_EVENT:
             g_stopRequested.store(true, std::memory_order_relaxed);
-            // 已处理，交由业务层走“安全收尾 + checkpoint 保存”流程。
-            return TRUE;
+            return TRUE; // handled (let app stop safely and checkpoint)
         default:
             return FALSE;
     }
 }
 
 namespace {
-    // 启动参数帮助：
-    // 既覆盖 checkpoint 维护，也覆盖调试模式和远程控制模式。
+    constexpr unsigned kScreenLogicalW = 2560;
+    constexpr unsigned kScreenLogicalH = 1440;
+    constexpr unsigned kMouseMax = 65535;
+}
+
+namespace {
     void printCheckpointHelp() {
         std::cout <<
 R"(Checkpoint tools:
-  启动参数默认来自 config/bot_settings.json 的 runtime 段
-  （mem-backend / cid / port / vsock-timeout-ms / remote-port 等）。
-
-  --checkpoint <path>         checkpoint 文件路径（默认 runtime.checkpoint_path）
+  --checkpoint <path>         checkpoint 文件路径（默认 bot_checkpoint.json）
   --show-checkpoint           打印当前 checkpoint 并退出
   --reset-checkpoint          删除 checkpoint（下次从头开始）并退出
   --set-next-op <n>           设置 next_op 并退出
   --set-cycle <n>             设置 cycle 并退出
   --set-target-money <n>      设置目标银票（默认 150000）并退出
-  --print-cursor              持续打印当前鼠标坐标（调试模式）
-  --cursor-interval-ms <n>    鼠标坐标打印间隔毫秒（默认 100）
-  --pid <n>                   print-cursor 模式下用于读内存链的目标 PID
-  --remote-control            开启远程控制模式（通过 TCP 指令启停）
-  --remote-port <n>           远程控制监听端口（默认 runtime.remote_port）
 
 next_op 对应关系（v3）:
   0: leave_gang_to_difu        出帮派 -> 长安 -> 大唐国境 -> 地府
@@ -76,66 +56,17 @@ next_op 对应关系（v3）:
 )";
     }
 
-    // 通用整数解析（十进制），用于 checkpoint 相关参数。
     bool parseInt(const std::string& s, int& out) {
         try { out = std::stoi(s); return true; } catch (...) { return false; }
     }
-
-    // 无符号 32 位解析：
-    // base=0 允许十进制和 0x 前缀十六进制。
-    bool parseU32(const std::string& s, uint32_t& out) {
-        try {
-            const auto v = std::stoull(s, nullptr, 0);
-            if (v > 0xffffffffULL) return false;
-            out = static_cast<uint32_t>(v);
-            return true;
-        } catch (...) {
-            return false;
-        }
-    }
-
-    // 无符号 64 位解析（支持 0x 前缀）。
-    bool parseU64(const std::string& s, uint64_t& out) {
-        try {
-            out = std::stoull(s, nullptr, 0);
-            return true;
-        } catch (...) {
-            return false;
-        }
-    }
-
 } // namespace
 
 int main(int argc, char** argv) {
-#ifdef _WIN32
-    // 控制台编码与源码 UTF-8 字符串保持一致，避免中文日志乱码。
-    SetConsoleOutputCP(CP_UTF8);
-    SetConsoleCP(CP_UTF8);
-#endif
-    std::setlocale(LC_ALL, ".UTF-8");
-
-    // -----------------------------
-    // 第一阶段：解析命令行参数
-    // -----------------------------
-    // 说明：
-    // 1) 该阶段不触发任何外部依赖（不连 vsock，不初始化 bot）
-    // 2) checkpoint 工具类参数可“只读/只改后立即退出”
-    // 3) --print-cursor 属于独立调试模式，也会提前退出
-    // 启动参数默认来自配置文件 runtime 段。
-    // 命令行参数若传入则覆盖这里的默认值。
-    const config::BotSettings& startupConfig = config::GetBotSettings();
-    std::string checkpointPath = startupConfig.runtime.checkpoint_path;
+    // Parse args for checkpoint management (no HV required)
+    std::string checkpointPath = "bot_checkpoint.json";
     bool showCk = false;
     bool resetCk = false;
     bool setSomething = false;
-    bool printCursor = false;
-    std::string memBackend = startupConfig.runtime.mem_backend;
-    uint32_t vsockCid = startupConfig.runtime.vsock_cid;
-    uint32_t vsockPort = startupConfig.runtime.vsock_port;
-    uint32_t vsockTimeoutMs = startupConfig.runtime.vsock_timeout_ms;
-    uint32_t cursorIntervalMs = startupConfig.runtime.cursor_interval_ms;
-    uint32_t remotePort = startupConfig.runtime.remote_port;
-    uint64_t debugPid = 0;
     TradingCheckpoint forced{};
     bool forceNextOp = false, forceCycle = false, forceTarget = false;
 
@@ -170,54 +101,9 @@ int main(int argc, char** argv) {
             if (!parseInt(args[++i], v)) { std::cerr << "bad --set-target-money\n"; return 2; }
             forced.target_money = v; forceTarget = true; setSomething = true; continue;
         }
-        if (a == "--print-cursor") {
-            printCursor = true;
-            continue;
-        }
-        if (a == "--cursor-interval-ms" && i + 1 < argc) {
-            if (!parseU32(args[++i], cursorIntervalMs)) { std::cerr << "bad --cursor-interval-ms\n"; return 2; }
-            continue;
-        }
-        if (a == "--pid" && i + 1 < argc) {
-            if (!parseU64(args[++i], debugPid)) { std::cerr << "bad --pid\n"; return 2; }
-            continue;
-        }
-        if (a == "--remote-control") {
-            // 兼容旧参数：
-            // 当前版本默认即启用 RuntimeController，因此该参数仅保留占位，
-            // 避免旧脚本报错。
-            continue;
-        }
-        if (a == "--remote-port" && i + 1 < argc) {
-            if (!parseU32(args[++i], remotePort) || remotePort == 0 || remotePort > 65535) {
-                std::cerr << "bad --remote-port\n";
-                return 2;
-            }
-            continue;
-        }
-        if (a == "--mem-backend" && i + 1 < argc) {
-            memBackend = args[++i];
-            continue;
-        }
-        if (a == "--cid" && i + 1 < argc) {
-            if (!parseU32(args[++i], vsockCid)) { std::cerr << "bad --cid\n"; return 2; }
-            continue;
-        }
-        if (a == "--port" && i + 1 < argc) {
-            if (!parseU32(args[++i], vsockPort)) { std::cerr << "bad --port\n"; return 2; }
-            continue;
-        }
-        if (a == "--vsock-timeout-ms" && i + 1 < argc) {
-            if (!parseU32(args[++i], vsockTimeoutMs)) { std::cerr << "bad --vsock-timeout-ms\n"; return 2; }
-            continue;
-        }
     }
 
     if (showCk || resetCk || setSomething) {
-        // -----------------------------
-        // 第二阶段：checkpoint 维护模式
-        // -----------------------------
-        // 命中该分支时，执行完对应操作后直接退出，不进入 bot 主流程。
         CheckpointStore store(checkpointPath);
         TradingCheckpoint ck;
         std::string err;
@@ -234,7 +120,7 @@ int main(int argc, char** argv) {
         }
 
         if (setSomething) {
-            // 若当前不存在 checkpoint，则从默认 v3 结构创建。
+            // if no existing ck, start from defaults v3
             if (!has) ck = TradingCheckpoint{};
             ck.version = 3;
             if (forceNextOp) ck.next_op = forced.next_op;
@@ -270,100 +156,74 @@ int main(int argc, char** argv) {
         }
     }
 
-    if (printCursor) {
-        // -----------------------------
-        // 第三阶段：光标/内存链调试模式
-        // -----------------------------
-        // 该模式用于在线验证：
-        // - Win32 鼠标位置（GetCursorPos）
-        // - 游戏内存链坐标（dllBase + pointer chain）
-        // 两者会并行打印，便于快速确认偏移与读链是否正确。
-        SetConsoleCtrlHandler(ConsoleCtrlHandler, TRUE);
-        if (cursorIntervalMs == 0) {
-            cursorIntervalMs = 1;
-        }
-        if (debugPid == 0) {
-            std::cerr << "[Bot] --print-cursor 需要同时指定 --pid\n";
-            return 2;
-        }
-
-        if (memBackend != "vsock") {
-            std::cerr << "unsupported --mem-backend in print-cursor: " << memBackend << " (expected vsock)\n";
-            return 2;
-        }
-        std::shared_ptr<IProcessMemoryReader> debugReader =
-            create_vsock_memory_reader(vsockCid, vsockPort, vsockTimeoutMs);
-        std::string err;
-        if (!debugReader->initialize_binding(debugPid, &err)) {
-            std::cerr << "[Bot] print-cursor INIT_BIND 失败: " << err << "\n";
-            return 2;
-        }
-
-        std::cout << "[Bot] 光标坐标打印模式已启动（Ctrl+C 停止），interval="
-                  << cursorIntervalMs << "ms"
-                  << " pid=" << debugPid
-                  << " shared_addr=0x" << std::hex
-                  << reinterpret_cast<std::uintptr_t>(&g_shared_data)
-                  << std::dec << "\n";
-        while (!g_stopRequested.load(std::memory_order_relaxed)) {
-            POINT pt{};
-            if (GetCursorPos(&pt)) {
-                const SharedDataSnapshot snap = read_shared_data_snapshot();
-                std::cout << "[Cursor] x=" << pt.x << " y=" << pt.y
-                          << " sync=" << snap.sync_flag
-                          << " ts=" << snap.timestamp
-                          << " pit_x=" << snap.pit_x
-                          << " pit_y=" << snap.pit_y
-                          << " role_x=" << snap.role_raw_x
-                          << " role_y=" << snap.role_raw_y
-                          << " map_id=" << snap.map_id
-                          << "\n";
-            } else {
-                std::cerr << "[Cursor] GetCursorPos failed\n";
-            }
-            Sleep(cursorIntervalMs);
-        }
-        return 0;
+    // 检查 HV 是否运行
+    if (!hv::is_hv_running()) {
+        std::wcout << L"HV not running.\n";
+        return -1;
     }
-
-    // -----------------------------
-    // 第四阶段：正式运行模式
-    // -----------------------------
-    // 创建进程内存读取后端，并注入到 gameMemory。
-    std::shared_ptr<IProcessMemoryReader> reader;
-    if (memBackend == "vsock") {
-        reader = create_vsock_memory_reader(vsockCid, vsockPort, vsockTimeoutMs);
-    } else {
-        std::cerr << "unsupported --mem-backend: " << memBackend << " (expected vsock)\n";
-        return 2;
-    }
-
-    bot.gameMemory.set_memory_reader(reader);
 
     // Ctrl+C / 关闭窗口请求安全停止（保存 checkpoint）
     SetConsoleCtrlHandler(ConsoleCtrlHandler, TRUE);
 
+    auto const hv_base = static_cast<uint8_t*>(hv::get_hv_base());
+    auto const hv_size = 0x64000;
+    // 隐藏 hypervisor
+    hv::for_each_cpu([&](uint32_t) {
+        for (size_t i = 0; i < hv_size; i += 0x1000) {
+            auto const virt = hv_base + i;
+            auto const phys = hv::get_physical_address(0, virt);
+
+
+
+            
+            hv::hide_physical_page(phys >> 12);
+        }
+    });
+
+    // 确保退出时清理 HV（无论是否中断）
+    struct HvCleanupGuard {
+        ~HvCleanupGuard() {
+            hv::for_each_cpu([](uint32_t) {
+                hv::remove_all_mmrs();
+            });
+        }
+    } hvGuard;
+
     try {
-        // 运行控制接线说明：
-        // - init 回调：只做初始化（不自动开跑）
-        // - run  回调：真正执行跑商循环
-        // - stop 回调：只置停止标志，不做阻塞操作
-        // RuntimeController 负责接收 TCP 指令并驱动这三类回调。
+        bot.init();
+
+        // 启动 Memflow 迁移 (如果游戏进程已找到)
+        if (!bot.gameMemory.processIds.empty()) {
+            bot.gameMemory.setMemflow(&memflow);
+            memflow.start((uint32_t)bot.gameMemory.processIds[0], bot.gameMemory.dllBaseAddrs[0]);
+        }
+
         bot.configureRunControl(&g_stopRequested, "bot_checkpoint.json");
-        runtime::ServerOptions options{};
-        options.port = remotePort;
-        runtime::RuntimeController controller(
-            options,
-            [&]() { bot.init(); },
-            [&]() {
-                g_stopRequested.store(false, std::memory_order_relaxed);
-                bot.runTradingRoute();
-            },
-            [&]() { g_stopRequested.store(true, std::memory_order_relaxed); }
-        );
-        return controller.RunBlocking();
+        std::cout << "[Bot] 初始化完成（按 Enter 或 Ctrl+C 请求停止，可续跑）\n";
+
+        // 监听控制台 Enter（不阻塞主线程）
+        std::thread([] {
+            std::string line;
+            std::getline(std::cin, line);
+            g_stopRequested.store(true, std::memory_order_relaxed);
+        }).detach();
+
+        IbSendMouseMove(static_cast<int>(kMouseMax * 1280 / kScreenLogicalW),
+                        static_cast<int>(kMouseMax * 40 / kScreenLogicalH),
+                        Send::MoveMode::Absolute);
+        Sleep(100);
+        IbSendMouseClick(Send::MouseButton::Left);
+        Sleep(100);
+        IbSendMouseMove(static_cast<int>(kMouseMax * 1280 / kScreenLogicalW),
+                        static_cast<int>(kMouseMax * 200 / kScreenLogicalH),
+                        Send::MoveMode::Absolute);
+        Sleep(100);
+
+        bot.runTradingRoute();
     } catch (const std::exception& e) {
         std::cerr << "[Bot] 异常退出: " << e.what() << "\n";
         return -2;
     }
+
+    return 0;
 }

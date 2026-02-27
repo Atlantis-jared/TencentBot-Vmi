@@ -1,108 +1,186 @@
-# TencentBot-vmi Industrial Architecture Baseline
+# 架构详解
 
-本文件定义 TencentBot-vmi 的“工业级”基线，后续所有重构都以此为准。
+本文档面向开发者，详细说明项目的技术实现细节。
 
-## 1. 分层原则
+---
 
-- `Presentation`：远程控制协议（INIT/START/STOP/STATUS/QUIT）
-- `Application`：生命周期状态机（NotInitialized/Initializing/Idle/Running/InitFailed）
-- `Domain`：跑商策略（行为树）
-- `Infrastructure`：内存读取、输入模拟、视觉识别、DXGI 捕获、AI 验证码
+## 数据流
 
-禁止跨层直接耦合：
+```
+┌──────────────────────── 游戏进程 ────────────────────────┐
+│  mhmain.exe（游戏逻辑）    mhtab.exe（UI 渲染窗口）       │
+└──────┬────────────────────────────────┬──────────────────┘
+       │ ① hv::read_virt_mem            │ ② DXGI Desktop Dup
+       │    读取角色坐标内存              │    截取游戏画面
+       ▼                                ▼
+ ┌──────────┐                  ┌──────────────────┐
+ │GameMemory│                  │DxgiWindowCapture │
+ │ RawCoord │                  │ BGRA imageBuffer │
+ │ GameCoord│                  └────────┬─────────┘
+ └────┬─────┘                           │
+      │                                 ▼
+      │                        ┌──────────────┐
+      │                        │ VisionEngine │
+      │                        │ matchTemplate│ ←── 模板 .png
+      │                        │ 地图/NPC 识别 │
+      │                        └────────┬─────┘
+      │                                 │
+      ▼                                 ▼
+ ┌──────────────────────────────────────────┐
+ │              TencentBot                  │
+ │  路线调度 → 小地图点击 → 交易操作         │
+ │  ↕ IbInputSimulator（鼠标/键盘模拟）     │
+ │  ↕ CaptchaEngine（价格数字 OCR）         │
+ │  ↕ CheckpointStore（JSON 断点）          │
+ └──────────────────────────────────────────┘
+```
 
-- 控制层不能直接调用底层细节（只通过 `TencentBot::init/runTradingRoute`）
-- 策略层不能直接访问网络层
-- 业务层不直接依赖 `src/bt/*`，统一通过 `src/domain/TradingRouteBehavior.*` 门面访问行为树
+---
 
-实现拆分（当前）：
+## 内存读取原理（GameMemory）
 
-- `src/TencentBot.Core.cpp`：初始化、驱动自检、生命周期基础能力
-- `src/TencentBot.Motion.cpp`：底层输入、寻路、传送辅助
-- `src/TencentBot.Routes.cpp`：地图段路线与恢复路线
-- `src/TencentBot.TradeOps.cpp`：交易面板识别与买卖操作
-- `src/TencentBot.TradingRoute.cpp`：跑商行为树主循环编排
-- `src/TencentBot.Captcha.cpp`：银票提交成语验证
-- `src/config/BotSettings.*`：可配置参数加载（时间、阈值、窗口偏移、地图参数）
+### 指针链
 
-## 2. 生命周期状态机
+```
+DLL基址 + 0x26A0C88  →  一级指针 (8字节)
+一级指针 + 0x370      →  角色X坐标 (uint32)
+一级指针 + 0x374      →  角色Y坐标 (uint32)
+```
 
-状态：
+所有读取通过 `hv::read_virt_mem(cr3, dst, src, size)` 完成，无需注入目标进程。
 
-- `NOT_INITIALIZED`
-- `INITIALIZING`
-- `IDLE`
-- `RUNNING`
-- `INIT_FAILED`
+### 坐标换算
 
-命令约束：
+游戏使用的原始坐标是高精度像素值，需要换算为人类可读的「地图格子坐标」：
 
-- `INIT` 仅在 `NOT_INITIALIZED/INIT_FAILED` 有效
-- `START` 仅在 `IDLE` 有效
-- `STOP` 仅请求停止，不触发状态跳变到未初始化
-- `STATUS` 必须可重入、无副作用
+```
+GameCoord.x = (rawPixelX - 10) / 20
+GameCoord.y = (kMapYBase[当前地图名] - rawPixelY) / 20
+```
 
-## 3. 跑商策略（行为树）
+`kMapYBase` 是每张地图独立的 Y 轴基准值（因为不同地图的原点位置不同）。
 
-`runTradingRoute()` 使用行为树驱动：
+---
 
-- `Selector`
-  - `Sequence(goal_reached_condition -> return_and_submit_action)`
-  - `Selector(step_dispatch_branch)`
-    - `Sequence(is_step_0 -> run_leave_gang_to_difu)`
-    - `Sequence(is_step_1 -> run_difu_buy_paper)`
-    - `Sequence(is_step_2 -> run_travel_to_beiju)`
-    - `Sequence(is_step_3 -> run_beiju_sell_paper_buy_oil)`
-    - `Sequence(is_step_4 -> run_return_to_difu)`
-    - `Sequence(is_step_5 -> run_difu_sell_oil)`
-    - `Action(cycle_restart_if_needed)`
+## 视觉识别原理（VisionEngine）
 
-说明：
+### 模板匹配流程
 
-- 每个 `tick` 最多推进一个业务步骤，`next_op` 作为分发条件
-- `goal_branch` 优先级高于普通步骤分支（达标后立即回帮提交）
-- `cycle_restart_if_needed` 仅在 `next_op == steps.size()` 时触发新一轮 cycle
-- step 动作采用“协作式状态机”返回 `Running/Success/Failure`，`tick()` 本身保持非阻塞
+```
+截图(BGRA) → cvtColor(BGR) → matchTemplate(TM_CCOEFF_NORMED) → minMaxLoc → 分数判定
+```
 
-收益：
+- **地图识别**：遍历 12 张地图模板，取最高分（阈值 ≥ 0.80）
+- **NPC 识别**：单一模板匹配（阈值 ≥ 0.70），返回中心坐标
+- **UI 定位**：日/夜双模板策略（文件名后缀 `1`），阈值 ≥ 0.75
 
-- 业务步骤可插拔
-- checkpoint 推进逻辑统一
-- 控制面（STOP/STATUS）响应更及时
-- goal 分支与普通执行分支解耦
+### 模板缓存策略
 
-## 4. 可靠性基线
+| 模板类型 | 加载时机 | 缓存位置 |
+|---------|---------|---------|
+| 地图模板 | `loadAllTemplates()` | `mapTemplates` |
+| NPC 模板 | `loadAllTemplates()` | `npcTemplates` |
+| UI 模板 | 首次 `locateMapUiOnScreen()` | `mapUiTemplateCache`（懒加载） |
 
-- 控制线程与执行线程分离（条件变量驱动，避免轮询）
-- 所有异常必须落日志并转成可观察状态
-- checkpoint 在 stop/步骤推进/关键状态变化时持久化
-- 远程命令幂等（重复 INIT/START 不导致状态错乱）
+---
 
-## 5. 可观测性基线
+## 鼠标轨迹算法（TencentBot）
 
-必须输出：
+使用**三次贝塞尔曲线 + 过冲拉回**两阶段策略：
 
-- 生命周期状态变化日志
-- 命令请求与响应（至少文本级）
-- 初始化失败原因（`INIT_FAILED <reason>`）
+### 阶段1：贝塞尔曲线
 
-建议后续补充：
+```
+B(t) = (1-t)³·P₀ + 3(1-t)²t·P₁ + 3(1-t)t²·P₂ + t³·P₃
+```
 
-- 结构化 JSON 日志
-- Prometheus 指标（状态、循环次数、失败次数、命令耗时）
+- P₀ = 当前位置
+- P₁, P₂ = 在法线方向随机偏移的控制点（产生弧线效果）
+- P₃ = 目标 + 过冲量（1.5~3.0 像素单位）
+- 使用 ease-out 缓动函数 `t' = t(2-t)`
 
-## 6. 安全与运行规范
+### 阶段2：精确拉回
 
-- 控制端口默认仅内网可达
-- WebUI 与控制端建议通过网段 ACL/VPN 隔离
-- 禁止在未初始化状态下直接执行 run
+从过冲点微调到精确目标，步长系数 0.25，最多 15 次迭代，到达半径 2.0。
 
-## 7. 后续工业化改造清单
+---
 
-- 抽离 `RuntimeController` 为独立类（`src/runtime/`）[done]
-- 抽离行为树节点到独立模块（`src/bt/`）[done]
-- 跑商主循环改为显式 step 分发行为树（非单一 step_action）[done]
-- step 分发分支构建器抽离为 `src/bt/StepDispatchTree.*` [done]
-- 命令协议升级为 JSON（带 request_id）[in progress: text protocol already supports request_id]
-- 增加集成测试（命令状态转换、checkpoint 恢复、异常恢复）
-- 增加故障注入测试（初始化失败、网络抖动、识别失败）
+## 断点续跑机制
+
+### 数据结构
+
+```json
+{
+  "version": 3,
+  "route": "TradingRoute",
+  "next_op": 0,
+  "last_op_name": "",
+  "updated_at_ms": 1740000000000,
+  "cycle": 0,
+  "target_money": 150000
+}
+```
+
+### 恢复策略
+
+- `next_op=0`（出帮派→地府）：调用 `resumeRoute_leaveBangpaiToDifu()`，根据当前地图自动判断从哪个节点继续
+- `next_op=2`（地→北俱）：调用 `resumeRoute_travelToBeixu()`，8 段传送链路中任意点恢复
+- 其他步骤：直接从对应操作开始执行
+
+### 版本迁移
+
+启动时自动将旧版 checkpoint 升级到 v3 格式（调整 `next_op` 偏移并设置版本号）。
+
+---
+
+## 交易逻辑
+
+### 比价流程
+
+```
+走到商人A → 查询价格 → 关闭面板
+走到商人B → 查询价格 → 关闭面板
+选价格更优的商人 → 执行买入/卖出
+```
+
+### 价格识别
+
+1. 打开交易面板
+2. 通过 AI 检测（`CaptchaEngine.detectObject`）或模板匹配定位物品图标
+3. 点击物品后截图目标价格区域（固定 ROI）
+4. 将 ROI 图像发送给 AI 服务识别数字（`CaptchaEngine.recognizeNumber`）
+
+### 卖出验证
+
+卖出操作后在物品原位置做二次模板匹配：
+- 物品图标消失 → 判定成功
+- 图标仍在 → 判定失败，自动重试（最多 2 次）
+
+---
+
+## 传送重试机制
+
+NPC 传送和 UI 传送均支持自动重试（默认 3 次）：
+
+```
+尝试传送 → 检查地图是否切换成功
+  ↓ 失败
+隐藏其他玩家 → 走回 NPC 附近 → 重新尝试
+  ↓ 再次失败
+重复直到达到最大尝试次数
+```
+
+失败原因通常是其他玩家模型遮挡 NPC 识别。`hideOtherPlayers()` 通过 Alt+H + F9 组合键清理视野。
+
+---
+
+## 关键常量
+
+| 常量 | 值 | 说明 |
+|------|-----|------|
+| `GAME_PIT_CHAIN_BASE_OFFSET` | 0x26A0C88 | DLL 基址 + 此偏移 = 一级指针 |
+| `GAME_PIT_POS_STRUCT_OFFSET` | 0x370 | 一级指针 + 此偏移 = X 坐标 |
+| `kMapRecognizeMinScore` | 0.80 | 地图识别最低分数 |
+| `kMapUiLocateMinScore` | 0.75 | UI 定位最低分数 |
+| `WINDOW_BORDER_OFFSET_X/Y` | -6, -57 | 窗口边框补偿 |
+| `MOVE_SCALE` | 0.35 | 游戏坐标差→鼠标位移比例 |

@@ -1,5 +1,6 @@
 cmake_minimum_required(VERSION 3.20)
 project(untitled)
+enable_language(ASM_MASM)
 
 # 修正 MASM 编码警告：仅对 CXX 应用 /utf-8
 add_compile_options("$<$<COMPILE_LANGUAGE:CXX>:/utf-8>")
@@ -17,27 +18,14 @@ find_package(cppwinrt CONFIG REQUIRED)
 
 add_executable(untitled
         main.cpp
-        src/TencentBot.Core.cpp
-        src/TencentBot.Motion.cpp
-        src/TencentBot.Routes.cpp
-        src/TencentBot.TradeOps.cpp
-        src/TencentBot.TradingRoute.cpp
-        src/TencentBot.Captcha.cpp
+        dumper.cpp
+        hv.asm
+        src/TencentBot.cpp
         src/CheckpointStore.cpp
         src/DxgiWindowCapture.cpp
         src/CaptchaEngine.cpp
         src/GameMemory.cpp
         src/VisionEngine.cpp
-        src/MemoryReader.cpp
-        src/SharedDataStatus.cpp
-        src/config/BotSettings.cpp
-        src/bt/BehaviorTree.cpp
-        src/bt/StepDispatchTree.cpp
-        src/bt/RetryDecorator.cpp
-        src/bt/WaitAction.cpp
-        src/domain/TradingRouteBehavior.cpp
-        src/domain/TradingStepTrees.cpp
-        src/runtime/RuntimeController.cpp
 )
 
 add_subdirectory(./IbInputSimulator/Simulator)
@@ -54,7 +42,6 @@ target_link_libraries(untitled PRIVATE
         dxgi.lib
         dwmapi.lib
         windowsapp.lib
-        ws2_32.lib
 )
 
 # 设置编译选项
@@ -77,8 +64,8 @@ add_custom_command(TARGET untitled POST_BUILD
         $<TARGET_FILE_DIR:untitled>
 )
 # 编译完成后拷贝资源目录到输出目录（源目录;目标子目录名）
-set(ASSET_SRCS assets/maps assets/npc assets/mapsui assets/config)
-set(ASSET_DSTS maps npcs mapsui config)
+set(ASSET_SRCS assets/maps assets/npc assets/mapsui)
+set(ASSET_DSTS maps npcs mapsui)
 list(LENGTH ASSET_SRCS N_ASSETS)
 math(EXPR N_ASSETS_LAST "${N_ASSETS} - 1")
 foreach(i RANGE ${N_ASSETS_LAST})

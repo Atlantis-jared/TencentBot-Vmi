@@ -29,23 +29,13 @@ VisionEngine::VisionEngine(DxgiWindowCapture& screenCapture)
 // =============================================================================
 // loadAllTemplates() — 统一入口，初始化时调用一次
 // =============================================================================
-bool VisionEngine::loadAllTemplates() {
+void VisionEngine::loadAllTemplates() {
     BOT_LOG("VisionEngine", "开始加载所有模板...");
     loadMapTemplatesFromDisk();
     initNpcConfigs();
     loadNpcTemplatesFromDisk();
     BOT_LOG("VisionEngine", "模板加载完毕，地图模板=" << mapTemplates.size()
             << " NPC模板=" << npcTemplates.size());
-    if (mapTemplates.empty()) {
-        BOT_ERR("VisionEngine", "地图模板为空，初始化失败");
-        return false;
-    }
-    if (npcTemplates.empty() || npcTemplates.size() != npcConfigs.size()) {
-        BOT_ERR("VisionEngine", "NPC 模板加载不完整，初始化失败: loaded="
-                << npcTemplates.size() << " expected=" << npcConfigs.size());
-        return false;
-    }
-    return true;
 }
 
 // =============================================================================

@@ -19,7 +19,6 @@
 #include <chrono>
 #include <ctime>
 #include <iomanip>
-#include <mutex>
 #include <sstream>
 
 namespace BotLogger {
@@ -52,19 +51,6 @@ inline std::string formatModuleName(const char* moduleName, int paddedWidth = 12
     return name;
 }
 
-// 全局输出互斥：所有模块统一复用，避免多线程日志互相插行。
-inline std::mutex& outputMutex() {
-    static std::mutex m;
-    return m;
-}
-
-inline void writeLine(std::ostream& os, const char* level, const char* moduleName, const std::string& message) {
-    std::lock_guard<std::mutex> lk(outputMutex());
-    os << "[" << currentTimestamp() << "] [" << level << "] ["
-       << formatModuleName(moduleName) << "] " << message << "\n";
-    os.flush();
-}
-
 } // namespace BotLogger
 
 // =============================================================================
@@ -73,24 +59,15 @@ inline void writeLine(std::ostream& os, const char* level, const char* moduleNam
 
 /// 普通信息日志，输出到 stdout
 #define BOT_LOG(module, msg) \
-    do { \
-        std::ostringstream _bot_log_oss; \
-        _bot_log_oss << msg; \
-        BotLogger::writeLine(std::cout, "INFO ", module, _bot_log_oss.str()); \
-    } while (0)
+    std::cout << "[" << BotLogger::currentTimestamp() << "] [INFO ] [" \
+              << BotLogger::formatModuleName(module) << "] " << msg << "\n"
 
 /// 警告日志，输出到 stdout（黄色语义，但终端颜色依赖环境，不强制转义码）
 #define BOT_WARN(module, msg) \
-    do { \
-        std::ostringstream _bot_warn_oss; \
-        _bot_warn_oss << msg; \
-        BotLogger::writeLine(std::cout, "WARN ", module, _bot_warn_oss.str()); \
-    } while (0)
+    std::cout << "[" << BotLogger::currentTimestamp() << "] [WARN ] [" \
+              << BotLogger::formatModuleName(module) << "] " << msg << "\n"
 
 /// 错误日志，输出到 stderr
 #define BOT_ERR(module, msg) \
-    do { \
-        std::ostringstream _bot_err_oss; \
-        _bot_err_oss << msg; \
-        BotLogger::writeLine(std::cerr, "ERROR", module, _bot_err_oss.str()); \
-    } while (0)
+    std::cerr << "[" << BotLogger::currentTimestamp() << "] [ERROR] [" \
+              << BotLogger::formatModuleName(module) << "] " << msg << "\n"

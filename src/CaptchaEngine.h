@@ -3,6 +3,7 @@
 #include <string>
 #include <vector>
 #include <map>
+#include <iostream>
 #include <chrono>
 #include <iomanip>
 #include <sstream>
@@ -10,8 +11,6 @@
 #ifdef _WIN32
 #include <windows.h>
 #endif
-
-#include "BotLogger.h"
 
 struct Point2D {
     int x;
@@ -47,6 +46,5 @@ public:
     }
 };
 
-// Captcha 日志统一走 BotLogger，避免与 RuntimeController 输出互相插行。
-#define CE_LOG(msg) BOT_LOG("Captcha", msg)
-#define CE_ERR(msg) BOT_ERR("Captcha", msg)
+#define CE_LOG(msg) std::cout << "[" << CaptchaEngine::currentTimestamp() << "] [INFO] " << msg << std::endl
+#define CE_ERR(msg) std::cerr << "[" << CaptchaEngine::currentTimestamp() << "] [ERROR] " << msg << std::endl
