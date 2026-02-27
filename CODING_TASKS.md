@@ -16,11 +16,11 @@
 ## Phase 2: Guest 端 (TencentBot-vmi 仓库) 改造
 - [x] 1. **结构体植入**：已新增 `src/SharedDataStatus.h/.cpp`，使用 `volatile` + `#pragma pack(push, 1)` + 全局 `g_shared_data`。
 - [x] 2. **握手通讯**：已重构 `MemoryReader.cpp` 的 vsock 逻辑为一次性 `INIT_BIND` 握手，携带 `bot_pid` + `bot_receive_addr` + 目标进程信息。
-- [x] 3. **拆除旧网络读写**：`VsockMemoryReader` 已移除旧的高频读包流程，`read_virtual_by_pid` 对 vsock 模式返回禁用说明。
+- [x] 3. **拆除旧网络读写**：`VsockMemoryReader` 已移除旧的高频读包流程，改为仅保留一次性 `INIT_BIND` 握手。
 - [x] 4. **业务层适配**：`GameMemory` 已改为优先读取 `SharedDataStatus`，并在 `--print-cursor` 调试模式输出共享结构体实时值。
 
 ## Phase 3: Host 端改造（独立后端项目）
-- [x] 1. **核心底座迁移与增强**：已新建独立项目 `../TencentBot-vmi-mem-backend-cpp`，并通过 `../TencentBot-vmi-mem-backend/memflow_tool.py` 对接 **`memflow-py`** 真实读写链路。
+- [x] 1. **核心底座迁移与增强**：已新建独立项目 `../TencentBot-vmi-mem-backend-cpp`，并通过 `../TencentBot-vmi-memflow-rs`（官方 `memflow` Rust crate）提供真实读写链路。
 - [x] 2. **握手管道监听**：`TencentBot-vmi-mem-backend-cpp/src/main.cpp` 已实现 `INIT_BIND` 监听（支持 vsock/tcp），收到 Guest 虚拟地址后建立 worker 上下文。
 - [x] 3. **暴写循环引擎**：已实现高频注入线程（`--tick-ms` 默认 10ms），循环执行：
       `从游戏进程地址脱壳读出最新坐标 => 构造带时间戳和 FLAG 的 Payload => 瞬间写入 Guest Bot 共享结构体`。

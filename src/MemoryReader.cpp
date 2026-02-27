@@ -23,7 +23,6 @@
 #include "BotLogger.h"
 #include "GameMemory.h"
 #include "SharedDataStatus.h"
-#include "../hv.h"
 
 #pragma comment(lib, "Ws2_32.lib")
 
@@ -190,75 +189,6 @@ bool extract_json_token(const std::string& text, const std::string& key, std::st
 }
 
 }  // namespace
-
-bool HvMemoryReader::query_cr3(std::uint64_t pid, std::uint64_t* out_cr3, std::string* error) {
-    if (out_cr3 == nullptr) {
-        if (error) {
-            *error = "out_cr3 is null";
-        }
-        return false;
-    }
-    auto it = cr3_cache_.find(pid);
-    if (it != cr3_cache_.end()) {
-        *out_cr3 = it->second;
-        return true;
-    }
-    const std::uint64_t cr3 = hv::query_process_cr3(pid);
-    if (cr3 == 0) {
-        if (error) {
-            *error = "query_process_cr3 returned 0";
-        }
-        return false;
-    }
-    cr3_cache_[pid] = cr3;
-    *out_cr3 = cr3;
-    return true;
-}
-
-bool HvMemoryReader::read_virtual_by_pid(
-    std::uint64_t pid,
-    std::uint64_t va,
-    void* out,
-    std::size_t size,
-    std::string* error
-) {
-    if (out == nullptr || size == 0) {
-        if (error) {
-            *error = "invalid output buffer";
-        }
-        return false;
-    }
-    std::uint64_t cr3 = 0;
-    if (!query_cr3(pid, &cr3, error)) {
-        return false;
-    }
-    hv::read_virt_mem(cr3, out, reinterpret_cast<void*>(va), size);
-    return true;
-}
-
-bool HvMemoryReader::query_module_base_by_pid(
-    std::uint64_t pid,
-    const std::string& module_name,
-    std::uint64_t* out_base,
-    std::string* error
-) {
-    if (out_base == nullptr) {
-        if (error) {
-            *error = "out_base is null";
-        }
-        return false;
-    }
-    std::wstring wmodule(module_name.begin(), module_name.end());
-    std::uint64_t base = hv::get_va_of_dllbase(pid, const_cast<wchar_t*>(wmodule.c_str()), 20);
-    if (base == 0) {
-        if (error) {
-            *error = "get_va_of_dllbase returned 0";
-        }
-        return false;
-    }
-    *out_base = base;
-    return true;
-}
 
 VsockMemoryReader::VsockMemoryReader(std::uint32_t cid, std::uint32_t port, std::uint32_t timeout_ms)
     : cid_(cid), port_(port), timeout_ms_(timeout_ms) {}
@@ -489,47 +419,6 @@ bool VsockMemoryReader::initialize_binding(std::uint64_t target_pid, std::string
         error->clear();
     }
     return true;
-}
-
-bool VsockMemoryReader::read_virtual_by_pid(
-    std::uint64_t pid,
-    std::uint64_t va,
-    void* out,
-    std::size_t size,
-    std::string* error
-) {
-    (void)pid;
-    (void)va;
-    (void)out;
-    (void)size;
-    if (error) {
-        *error = "vsock direct read is disabled; use SharedDataStatus feed";
-    }
-    return false;
-}
-
-bool VsockMemoryReader::query_module_base_by_pid(
-    std::uint64_t pid,
-    const std::string& module_name,
-    std::uint64_t* out_base,
-    std::string* error
-) {
-    (void)module_name;
-    if (out_base == nullptr) {
-        if (error) {
-            *error = "out_base is null";
-        }
-        return false;
-    }
-    if (!initialize_binding(pid, error)) {
-        return false;
-    }
-    *out_base = 0;
-    return true;
-}
-
-std::shared_ptr<IProcessMemoryReader> create_hv_memory_reader() {
-    return std::make_shared<HvMemoryReader>();
 }
 
 std::shared_ptr<IProcessMemoryReader> create_vsock_memory_reader(

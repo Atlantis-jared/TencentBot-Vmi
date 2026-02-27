@@ -1,13 +1,11 @@
 #pragma once
 
-#include <cstddef>
 #include <cstdint>
 #include <memory>
 #include <mutex>
 #include <string>
-#include <unordered_map>
 
-// 统一内存读取后端接口：GameMemory 只依赖此接口，不直接依赖 hv/vsock。
+// 统一内存后端接口：当前仅保留 vsock INIT_BIND 握手能力。
 class IProcessMemoryReader {
 public:
     virtual ~IProcessMemoryReader() = default;
@@ -23,45 +21,6 @@ public:
 
     // 是否使用 Host->Guest 共享结构体数据面（而非主动读远端内存）。
     virtual bool uses_shared_data_feed() const { return false; }
-
-    virtual bool read_virtual_by_pid(
-        std::uint64_t pid,
-        std::uint64_t va,
-        void* out,
-        std::size_t size,
-        std::string* error
-    ) = 0;
-
-    virtual bool query_module_base_by_pid(
-        std::uint64_t pid,
-        const std::string& module_name,
-        std::uint64_t* out_base,
-        std::string* error
-    ) = 0;
-};
-
-// 旧方案：Hypervisor + CR3 读 VA。
-class HvMemoryReader final : public IProcessMemoryReader {
-public:
-    bool read_virtual_by_pid(
-        std::uint64_t pid,
-        std::uint64_t va,
-        void* out,
-        std::size_t size,
-        std::string* error
-    ) override;
-
-    bool query_module_base_by_pid(
-        std::uint64_t pid,
-        const std::string& module_name,
-        std::uint64_t* out_base,
-        std::string* error
-    ) override;
-
-private:
-    bool query_cr3(std::uint64_t pid, std::uint64_t* out_cr3, std::string* error);
-
-    std::unordered_map<std::uint64_t, std::uint64_t> cr3_cache_;
 };
 
 // 新方案：vsock 仅做 INIT_BIND 握手，后续数据面由 Host 物理写入共享结构体。
@@ -72,21 +31,6 @@ public:
 
     bool initialize_binding(std::uint64_t target_pid, std::string* error) override;
     bool uses_shared_data_feed() const override { return true; }
-
-    bool read_virtual_by_pid(
-        std::uint64_t pid,
-        std::uint64_t va,
-        void* out,
-        std::size_t size,
-        std::string* error
-    ) override;
-
-    bool query_module_base_by_pid(
-        std::uint64_t pid,
-        const std::string& module_name,
-        std::uint64_t* out_base,
-        std::string* error
-    ) override;
 
 private:
     bool init_bind_once(std::uint64_t target_pid, std::string* error);
@@ -102,7 +46,6 @@ private:
     bool bind_done_ = false;
 };
 
-std::shared_ptr<IProcessMemoryReader> create_hv_memory_reader();
 std::shared_ptr<IProcessMemoryReader> create_vsock_memory_reader(
     std::uint32_t cid,
     std::uint32_t port,

@@ -1,6 +1,6 @@
 # 梦幻西游跑商机器人
 
-基于 Hypervisor 内存读取 + DXGI 屏幕截图 + OpenCV 模板匹配的全自动跑商工具。
+基于 Host Rust memflow 内存数据面 + DXGI 屏幕截图 + OpenCV 模板匹配的全自动跑商工具。
 
 ---
 
@@ -39,12 +39,10 @@
 ## 项目结构
 
 ```
-├── main.cpp                  # 入口：参数解析 + HV 初始化 + 运行循环
-├── hv.h / hv.asm             # Hypervisor 驱动接口（内存读写、进程查询）
-├── dumper.h / dumper.cpp      # 内存 dump 工具
+├── main.cpp                  # 入口：参数解析 + 运行循环
 ├── src/
 │   ├── BotLogger.h            # 统一日志宏（BOT_LOG / BOT_WARN / BOT_ERR）
-│   ├── GameMemory.h / .cpp    # 内存读取层：CR3 管理 + 角色坐标读取/换算
+│   ├── GameMemory.h / .cpp    # 内存读取层：SharedDataStatus 坐标读取/换算
 │   ├── VisionEngine.h / .cpp  # 视觉引擎：截图 + 地图识别 + NPC 查找
 │   ├── TencentBot.h            # 主类声明
 │   ├── TencentBot.Core.cpp     # 初始化/生命周期
@@ -77,7 +75,7 @@
 ```
 ┌─────────────────────────────────────────┐
 │            main.cpp（入口）              │
-│   参数解析 / HV 初始化 / 信号处理        │
+│   参数解析 / 信号处理                    │
 └─────────────┬───────────────────────────┘
               │
 ┌─────────────▼───────────────────────────┐
@@ -88,8 +86,8 @@
 │ GameMemory  VisionEngine  CaptchaEngine │
 │ 内存读取     视觉识别       AI 识别      │
 │      │          │                       │
-│   hv.h    DxgiWindowCapture             │
-│  HV 驱动    DXGI 截图                   │
+│ SharedDataStatus  DxgiWindowCapture     │
+│ Host 数据面写入   DXGI 截图             │
 └─────────────────────────────────────────┘
 ```
 
@@ -109,11 +107,11 @@ BOT_ERR("Module", "错误内容");                // [ERROR] 错误信息
 
 #### GameMemory（`GameMemory.h/.cpp`）
 
-封装 Hypervisor 内存访问和游戏坐标系统：
+封装 SharedDataStatus 数据面读取和游戏坐标系统：
 
-- **`readPitPosRaw(processIndex)`** — 读取角色原始像素坐标（二级指针解引用）
+- **`readPitPosRaw(processIndex)`** — 读取角色原始像素坐标（共享结构体）
 - **`readRoleGameCoord(processIndex, mapName)`** — 将原始坐标换算为游戏世界坐标
-- 持有多进程的 PID / CR3 / DLL 基地址数组（支持多开）
+- 持有多进程 PID 列表并在初始化阶段完成 `INIT_BIND`
 
 坐标换算公式：
 ```
@@ -187,7 +185,6 @@ JSON 文件持久化，支持断点续跑：
 - Windows 10/11（SDK ≥ 10.0.19041.0）
 - Visual Studio 2022（MSVC v143，支持 C++20）
 - vcpkg（集成模式）
-- 自定义 Hypervisor 驱动已加载
 
 ### 编译步骤
 
@@ -216,11 +213,10 @@ cmake --build build --config Release
 
 ### 前提条件
 
-1. Hypervisor 驱动已加载（`hv::is_hv_running()` 返回 true）
-2. 游戏进程 `mhmain.exe` 和 `mhtab.exe` 正在运行
-3. Host 侧内存后端已启动（推荐 C++ 后端，监听 `4050`）
-4. AI 识别服务运行在 `http://127.0.0.1:8000`
-5. 屏幕分辨率 2560×1440（逻辑分辨率）
+1. 游戏进程 `mhmain.exe` 和 `mhtab.exe` 正在运行
+2. Host 侧内存后端已启动（推荐 C++ 后端，监听 `4050`）
+3. AI 识别服务运行在 `http://127.0.0.1:8000`
+4. 屏幕分辨率 2560×1440（逻辑分辨率）
 
 ### 启动内存后端（推荐）
 
@@ -229,20 +225,13 @@ cmake --build build --config Release
 cd /root/workspace/TencentBot-vmi-mem-backend-cpp
 cmake --preset linux-release
 cmake --build --preset build-release
-./build/release/tencentbot_mem_backend --transport vsock --listen-cid 2 --listen-port 4050 --backend mock --verbose
-```
-
-生产环境建议把 `--backend mock` 替换为 `--backend command --tool <你的物理读写工具>`。
-例如：
-
-```bash
-./build/release/tencentbot_mem_backend --transport vsock --listen-cid 2 --listen-port 4050 --backend command --tool /root/workspace/TencentBot-vmi-mem-backend/run_memflow_tool.sh
+./build/release/tencentbot_mem_backend --transport vsock --listen-cid 2 --listen-port 4050 --admin-host 127.0.0.1 --admin-port 4051 --backend command --log-file /tmp/tencentbot_mem_backend.log --tool /root/workspace/TencentBot-vmi-memflow-rs/run_memflow_tool.sh
 ```
 
 可先用下列命令验证 Host 已经能读取真实 VM 进程信息：
 
 ```bash
-/root/workspace/TencentBot-vmi-mem-backend/run_memflow_tool.sh list-procs --limit 20 --filter mh
+/root/workspace/TencentBot-vmi-memflow-rs/run_memflow_tool.sh list-procs --limit 20 --filter mh
 ```
 
 ### 基本用法

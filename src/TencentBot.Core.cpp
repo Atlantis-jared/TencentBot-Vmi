@@ -154,7 +154,8 @@ void TencentBot::init() {
     std::string initErr;
     if (!gameMemory.initialize_module_bases("mhmain.dll", &initErr)) {
         BOT_ERR("TencentBot", "初始化模块基址失败: " << initErr);
-        throw std::runtime_error("initialize_module_bases failed");
+        // 把底层初始化原因透传给 RuntimeController，便于外部快速定位失败点。
+        throw std::runtime_error("initialize_module_bases failed: " + initErr);
     }
 
     const auto ibInitErr = IbSendInit(Send::SendType::Logitech, 0, nullptr);

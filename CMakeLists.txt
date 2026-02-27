@@ -1,6 +1,5 @@
 cmake_minimum_required(VERSION 3.20)
 project(untitled)
-enable_language(ASM_MASM)
 
 # 修正 MASM 编码警告：仅对 CXX 应用 /utf-8
 add_compile_options("$<$<COMPILE_LANGUAGE:CXX>:/utf-8>")
@@ -18,8 +17,6 @@ find_package(cppwinrt CONFIG REQUIRED)
 
 add_executable(untitled
         main.cpp
-        dumper.cpp
-        hv.asm
         src/TencentBot.Core.cpp
         src/TencentBot.Motion.cpp
         src/TencentBot.Routes.cpp
